@@ -83,6 +83,9 @@ class JobService:
             await self.update_usage(site_id)
             print(f"[JOB_SERVICE] Usage updated for site {site_id}")
             
+            # Start article generation in background
+            await self._start_article_generation(job.id)
+            
             return JobResponse(
                 success=True,
                 job_id=job.id,
@@ -171,3 +174,12 @@ class JobService:
         except Exception as e:
             self.db.rollback()
             print(f"Failed to update usage: {e}")
+    
+    async def _start_article_generation(self, job_id: int):
+        """Start article generation for a job."""
+        try:
+            from aiwriter_backend.services.article_generator import ArticleGenerator
+            generator = ArticleGenerator(self.db)
+            await generator.generate_article(job_id)
+        except Exception as e:
+            print(f"[JOB_SERVICE] Error starting article generation: {e}")
