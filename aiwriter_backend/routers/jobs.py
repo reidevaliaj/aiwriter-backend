@@ -18,10 +18,20 @@ async def create_job(
     db: Session = Depends(get_db)
 ):
     """Create a new article generation job."""
+    print(f"[JOB_ROUTER] Received job request:")
+    print(f"[JOB_ROUTER] - Site ID: {x_site_id}")
+    print(f"[JOB_ROUTER] - Topic: {request.topic}")
+    print(f"[JOB_ROUTER] - Length: {request.length}")
+    print(f"[JOB_ROUTER] - Include Images: {request.include_images}")
+    print(f"[JOB_ROUTER] - Signature: {x_signature[:10]}...")
+    
     service = JobService(db)
-    return await service.create_job(
+    result = await service.create_job(
         site_id=x_site_id,
         topic=request.topic,
         length=request.length,
         include_images=request.include_images
     )
+    
+    print(f"[JOB_ROUTER] Job creation result: {result.success}, Message: {result.message}")
+    return result
