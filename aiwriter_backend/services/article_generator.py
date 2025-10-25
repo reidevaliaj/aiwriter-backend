@@ -138,12 +138,17 @@ class ArticleGenerator:
             # Create HMAC signature
             signature = create_hmac_signature(site.site_secret, json.dumps(article_data))
             
-            # WordPress webhook URL (this would be configured in the plugin)
-            # Handle both cases: domain with and without protocol
-            if site.domain.startswith('http'):
-                webhook_url = f"{site.domain}/wp-json/aiwriter/v1/publish"
+            # Use stored callback URL or fallback to constructed URL
+            if site.callback_url:
+                webhook_url = site.callback_url
+                print(f"[ARTICLE_GENERATOR] Using stored callback URL: {webhook_url}")
             else:
-                webhook_url = f"https://{site.domain}/wp-json/aiwriter/v1/publish"
+                # Fallback to constructed URL
+                if site.domain.startswith('http'):
+                    webhook_url = f"{site.domain}/wp-json/aiwriter/v1/publish"
+                else:
+                    webhook_url = f"https://{site.domain}/wp-json/aiwriter/v1/publish"
+                print(f"[ARTICLE_GENERATOR] Using fallback URL: {webhook_url}")
             
             payload = {
                 "site_id": site.id,
@@ -168,10 +173,60 @@ class ArticleGenerator:
             if response.status_code == 200:
                 print(f"[ARTICLE_GENERATOR] WordPress response: {response.json()}")
                 return True
+            elif response.status_code == 404:
+                # Try fallback URL if we got 404
+                return await self._try_fallback_url(site, job_id, article_data, signature, webhook_url)
             else:
                 print(f"[ARTICLE_GENERATOR] WordPress error: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
             print(f"[ARTICLE_GENERATOR] Error sending to WordPress: {str(e)}")
+            return False
+    
+    async def _try_fallback_url(self, site, job_id, article_data, signature, original_url):
+        """Try fallback URL if original URL returns 404."""
+        try:
+            # Determine fallback URL
+            if '/wp-json/' in original_url:
+                # Try with ?rest_route= format
+                fallback_url = original_url.replace('/wp-json/aiwriter/v1/publish', '/?rest_route=/aiwriter/v1/publish')
+            elif '?rest_route=' in original_url:
+                # Try with /wp-json/ format
+                fallback_url = original_url.replace('/?rest_route=/aiwriter/v1/publish', '/wp-json/aiwriter/v1/publish')
+            else:
+                print(f"[ARTICLE_GENERATOR] No fallback URL available for: {original_url}")
+                return False
+            
+            print(f"[ARTICLE_GENERATOR] Trying fallback URL: {fallback_url}")
+            
+            payload = {
+                "site_id": site.id,
+                "job_id": job_id,
+                "article_data": article_data,
+                "signature": signature
+            }
+            
+            response = requests.post(
+                fallback_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            print(f"[ARTICLE_GENERATOR] Fallback response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                print(f"[ARTICLE_GENERATOR] Fallback successful: {response.json()}")
+                # Update stored callback URL for future use
+                site.callback_url = fallback_url
+                self.db.commit()
+                print(f"[ARTICLE_GENERATOR] Updated callback URL to: {fallback_url}")
+                return True
+            else:
+                print(f"[ARTICLE_GENERATOR] Fallback failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"[ARTICLE_GENERATOR] Fallback error: {str(e)}")
             return False

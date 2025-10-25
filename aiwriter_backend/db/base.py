@@ -45,6 +45,7 @@ class Site(Base):
     license_id = Column(Integer, ForeignKey("licenses.id"), nullable=False)
     domain = Column(String, nullable=False)
     site_secret = Column(String, nullable=False)  # HMAC secret for this site
+    callback_url = Column(String, nullable=True)  # WordPress callback URL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships

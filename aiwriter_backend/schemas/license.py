@@ -9,6 +9,7 @@ class LicenseActivate(BaseModel):
     """Request schema for license activation."""
     license_key: str
     domain: str
+    callback_url: Optional[str] = None
 
 
 class LicenseActivateResponse(BaseModel):

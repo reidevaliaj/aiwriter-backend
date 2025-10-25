@@ -50,7 +50,8 @@ class LicenseService:
             site = Site(
                 license_id=license_obj.id,
                 domain=domain,
-                site_secret=site_secret
+                site_secret=site_secret,
+                callback_url=request.callback_url
             )
             
             self.db.add(site)
