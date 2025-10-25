@@ -139,7 +139,11 @@ class ArticleGenerator:
             signature = create_hmac_signature(site.site_secret, json.dumps(article_data))
             
             # WordPress webhook URL (this would be configured in the plugin)
-            webhook_url = f"https://{site.domain}/wp-json/aiwriter/v1/publish"
+            # Handle both cases: domain with and without protocol
+            if site.domain.startswith('http'):
+                webhook_url = f"{site.domain}/wp-json/aiwriter/v1/publish"
+            else:
+                webhook_url = f"https://{site.domain}/wp-json/aiwriter/v1/publish"
             
             payload = {
                 "site_id": site.id,
@@ -149,6 +153,7 @@ class ArticleGenerator:
             }
             
             print(f"[ARTICLE_GENERATOR] Sending to WordPress: {webhook_url}")
+            print(f"[ARTICLE_GENERATOR] Payload: {json.dumps(payload, indent=2)}")
             
             response = requests.post(
                 webhook_url,
@@ -156,6 +161,9 @@ class ArticleGenerator:
                 headers={"Content-Type": "application/json"},
                 timeout=30
             )
+            
+            print(f"[ARTICLE_GENERATOR] WordPress response status: {response.status_code}")
+            print(f"[ARTICLE_GENERATOR] WordPress response body: {response.text}")
             
             if response.status_code == 200:
                 print(f"[ARTICLE_GENERATOR] WordPress response: {response.json()}")
