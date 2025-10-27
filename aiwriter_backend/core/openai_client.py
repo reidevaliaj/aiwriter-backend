@@ -52,19 +52,35 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
     """
     client = get_openai()
     
-    # Default options
+    # Default options with compatibility for newer models
     options = {
         "model": settings.OPENAI_TEXT_MODEL,
         "temperature": settings.OPENAI_TEMPERATURE,
-        "max_tokens": settings.OPENAI_MAX_TOKENS_TEXT,
         "messages": messages
     }
+    
+    # Use correct token parameter based on model
+    if settings.OPENAI_TEXT_MODEL == "gpt-5":
+        # GPT-5 uses max_completion_tokens and supports new parameters
+        options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
+        options["verbosity"] = "minimal"  # GPT-5 specific parameter
+        options["reasoning_effort"] = "medium"  # GPT-5 specific parameter
+    elif settings.OPENAI_TEXT_MODEL in ["gpt-4o", "gpt-4o-mini"]:
+        # GPT-4o models use max_completion_tokens
+        options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
+    else:
+        # Older models use max_tokens
+        options["max_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
     
     # Override with any provided options
     options.update(opts)
     
     try:
         logger.info(f"Calling OpenAI with model: {options['model']}")
+        logger.info(f"Using token parameter: {'max_completion_tokens' if 'max_completion_tokens' in options else 'max_tokens'}")
+        if settings.OPENAI_TEXT_MODEL == "gpt-5":
+            logger.info(f"GPT-5 parameters: verbosity={options.get('verbosity')}, reasoning_effort={options.get('reasoning_effort')}")
+        
         response = client.chat.completions.create(**options)
         
         content = response.choices[0].message.content
