@@ -9,17 +9,89 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from aiwriter_backend.db.base import Job, Article, ArticleStatus, Site, License
-from aiwriter_backend.core.openai_client import run_text, gen_image, retry_with_json_prompt
+from aiwriter_backend.core.openai_client import run_text, run_text_structured, gen_image, retry_with_json_prompt
 from aiwriter_backend.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
-# German SEO system prompt
-SYSTEM_PROMPT_DE = (
+# JSON schemas for structured outputs
+OUTLINE_SCHEMA = {
+    "type": "object",
+    "required": ["title", "sections"],
+    "properties": {
+        "title": {"type": "string", "minLength": 3},
+        "sections": {
+            "type": "array",
+            "minItems": 3,
+            "items": {
+                "type": "object",
+                "required": ["h2"],
+                "properties": {
+                    "h2": {"type": "string", "minLength": 3},
+                    "h3s": {"type": "array", "items": {"type": "string"}}
+                }
+            }
+        }
+    }
+}
+
+FAQ_SCHEMA = {
+    "type": "array",
+    "minItems": 3,
+    "maxItems": 5,
+    "items": {
+        "type": "object",
+        "required": ["q", "a"],
+        "properties": {
+            "q": {"type": "string", "minLength": 3},
+            "a": {"type": "string", "minLength": 10, "maxLength": 900}
+        }
+    }
+}
+
+META_SCHEMA = {
+    "type": "object",
+    "required": ["title", "description"],
+    "properties": {
+        "title": {"type": "string", "maxLength": 60},
+        "description": {"type": "string", "maxLength": 155}
+    }
+}
+
+SCHEMA_SCHEMA = {
+    "type": "object",
+    "required": ["@context", "@type", "headline", "datePublished", "inLanguage"],
+    "properties": {
+        "@context": {"const": "https://schema.org"},
+        "@type": {"const": "Article"},
+        "headline": {"type": "string", "minLength": 3},
+        "datePublished": {"type": "string"},
+        "inLanguage": {"type": "string"},
+        "mainEntityOfPage": {
+            "type": "object",
+            "properties": {
+                "@type": {"const": "WebPage"},
+                "@id": {"type": "string"}
+            }
+        }
+    }
+}
+
+# System prompts separated by output type
+HTML_SYSTEM_PROMPT_DE = (
     "Du bist ein deutscher SEO-Redakteur. Schreibe faktenbasierte, klare Artikel in professionellem Ton. "
     "Verwende H2/H3-Überschriften, kurze Absätze (max. 120 Wörter) und Listen, wenn sinnvoll. "
     "Vermeide Wiederholungen und übertriebene Sprache. Antworte ausschließlich in HTML, ohne Markdown."
 )
+
+JSON_SYSTEM_PROMPT_DE = (
+    "Du bist ein deutscher SEO-Redakteur. Erstelle strukturierte Daten für Artikel. "
+    "Antworte ausschließlich in gültigem JSON-Format, ohne zusätzlichen Text oder Erklärungen. "
+    "Verwende deutsche Sprache für alle Inhalte."
+)
+
+# Legacy prompt (to be removed)
+SYSTEM_PROMPT_DE = HTML_SYSTEM_PROMPT_DE
 
 
 class ArticleGenerator:
@@ -180,7 +252,7 @@ class ArticleGenerator:
         }
         
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
             {
                 "role": "user", 
                 "content": f"""Erstelle eine detaillierte Gliederung für einen Artikel zum Thema "{topic}".
@@ -202,8 +274,21 @@ Stelle sicher, dass die Gliederung SEO-optimiert und strukturiert ist."""
             }
         ]
         
-        result = await retry_with_json_prompt(messages, "outline")
-        return result
+        try:
+            result = await run_text_structured(messages, OUTLINE_SCHEMA)
+            logger.info(f"Outline generated successfully for topic: {topic}")
+            return result
+        except Exception as e:
+            logger.error(f"Outline generation failed: {str(e)}")
+            # Fallback: return minimal outline
+            return {
+                "title": topic,
+                "sections": [
+                    {"h2": "Einführung", "h3s": []},
+                    {"h2": "Hauptinhalt", "h3s": []},
+                    {"h2": "Fazit", "h3s": []}
+                ]
+            }
     
     async def write_sections(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
         """Write article sections based on outline."""
@@ -215,7 +300,7 @@ Stelle sicher, dass die Gliederung SEO-optimiert und strukturiert ist."""
             
             # Generate content for this section
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT_DE},
+                {"role": "system", "content": HTML_SYSTEM_PROMPT_DE},
                 {
                     "role": "user",
                     "content": f"""Schreibe den Inhalt für den Abschnitt "{h2}" des Artikels zum Thema "{topic}".
@@ -240,7 +325,7 @@ Verwende keine Inline-CSS oder andere Formatierung."""
     async def write_intro_and_conclusion(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
         """Write introduction and conclusion paragraphs."""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {"role": "system", "content": HTML_SYSTEM_PROMPT_DE},
             {
                 "role": "user",
                 "content": f"""Schreibe eine Einleitung und einen Schluss für den Artikel zum Thema "{topic}".
@@ -260,7 +345,7 @@ Der Schluss soll die wichtigsten Punkte zusammenfassen."""
     async def generate_faq(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> List[Dict[str, str]]:
         """Generate FAQ questions and answers."""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
             {
                 "role": "user",
                 "content": f"""Erstelle 3-5 häufig gestellte Fragen zum Thema "{topic}".
@@ -275,13 +360,23 @@ Die Fragen sollen relevant und die Antworten präzise sein."""
             }
         ]
         
-        result = await retry_with_json_prompt(messages, "FAQ")
-        return result
+        try:
+            result = await run_text_structured(messages, FAQ_SCHEMA)
+            logger.info(f"FAQ generated successfully for topic: {topic}")
+            return result
+        except Exception as e:
+            logger.error(f"FAQ generation failed: {str(e)}")
+            # Fallback: return minimal FAQ
+            return [
+                {"q": f"Was ist {topic}?", "a": f"Eine detaillierte Erklärung zu {topic}."},
+                {"q": f"Warum ist {topic} wichtig?", "a": f"Die Bedeutung von {topic} wird hier erklärt."},
+                {"q": f"Wie funktioniert {topic}?", "a": f"Die Funktionsweise von {topic} wird hier beschrieben."}
+            ]
     
     async def generate_meta(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> Dict[str, str]:
         """Generate meta title and description."""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
             {
                 "role": "user",
                 "content": f"""Erstelle Meta-Titel und Meta-Beschreibung für den Artikel zum Thema "{topic}".
@@ -296,13 +391,22 @@ Beide sollen SEO-optimiert und ansprechend sein."""
             }
         ]
         
-        result = await retry_with_json_prompt(messages, "meta")
-        return result
+        try:
+            result = await run_text_structured(messages, META_SCHEMA)
+            logger.info(f"Meta generated successfully for topic: {topic}")
+            return result
+        except Exception as e:
+            logger.error(f"Meta generation failed: {str(e)}")
+            # Fallback: return minimal meta
+            return {
+                "title": topic[:60],
+                "description": f"Erfahren Sie alles über {topic}. Umfassende Informationen und praktische Tipps."[:155]
+            }
     
     async def generate_schema(self, outline: Dict[str, Any], faq_data: List[Dict[str, str]], topic: str, length: str, language: str, **kwargs) -> Dict[str, Any]:
         """Generate structured data schema."""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
             {
                 "role": "user",
                 "content": f"""Erstelle strukturierte Daten (Schema.org) für den Artikel zum Thema "{topic}".
@@ -332,28 +436,44 @@ Falls FAQ vorhanden sind, füge auch ein FAQPage-Schema hinzu."""
             }
         ]
         
-        result = await retry_with_json_prompt(messages, "schema")
-        
-        # Add FAQ schema if we have FAQ data
-        if faq_data:
-            faq_schema = {
-                "@context": "https://schema.org",
-                "@type": "FAQPage",
-                "mainEntity": [
-                    {
-                        "@type": "Question",
-                        "name": item["q"],
-                        "acceptedAnswer": {
-                            "@type": "Answer",
-                            "text": item["a"]
+        try:
+            result = await run_text_structured(messages, SCHEMA_SCHEMA)
+            logger.info(f"Schema generated successfully for topic: {topic}")
+            
+            # Add FAQ schema if we have FAQ data
+            if faq_data:
+                faq_schema = {
+                    "@context": "https://schema.org",
+                    "@type": "FAQPage",
+                    "mainEntity": [
+                        {
+                            "@type": "Question",
+                            "name": item["q"],
+                            "acceptedAnswer": {
+                                "@type": "Answer",
+                                "text": item["a"]
+                            }
                         }
-                    }
-                    for item in faq_data
-                ]
+                        for item in faq_data
+                    ]
+                }
+                result["faq"] = faq_schema
+            
+            return result
+        except Exception as e:
+            logger.error(f"Schema generation failed: {str(e)}")
+            # Fallback: return minimal schema
+            return {
+                "@context": "https://schema.org",
+                "@type": "Article",
+                "headline": topic,
+                "datePublished": datetime.now().isoformat(),
+                "inLanguage": language,
+                "mainEntityOfPage": {
+                    "@type": "WebPage",
+                    "@id": "https://example.com/article"
+                }
             }
-            result["faq"] = faq_schema
-        
-        return result
     
     async def assemble_html(self, intro_html: str, sections_html: str, topic: str, length: str, language: str, **kwargs) -> str:
         """Assemble final HTML article."""

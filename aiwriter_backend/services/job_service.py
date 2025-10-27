@@ -1,6 +1,7 @@
 """
 Job management service.
 """
+import asyncio
 from sqlalchemy.orm import Session
 from aiwriter_backend.db.base import Job, Site, License, Plan, Usage
 from aiwriter_backend.schemas.job import JobResponse
@@ -88,12 +89,13 @@ class JobService:
             
             print(f"[JOB_SERVICE] Job created successfully with ID: {job.id}")
             
-            # Update usage immediately
-            await self.update_usage(site_id)
-            print(f"[JOB_SERVICE] Usage updated for site {site_id}")
+            # DON'T update usage immediately - wait for success
+            # await self.update_usage(site_id)
+            # print(f"[JOB_SERVICE] Usage updated for site {site_id}")
             
-            # Start article generation in background
-            await self._start_article_generation(job.id)
+            # Start article generation in background (non-blocking)
+            asyncio.create_task(self._start_article_generation(job.id))
+            print(f"[JOB_SERVICE] Article generation started in background for job {job.id}")
             
             return JobResponse(
                 success=True,
@@ -196,6 +198,13 @@ class JobService:
             
             result = await generator.generate_article(job_id)
             print(f"[JOB_SERVICE] Article generation completed with result: {result}")
+            
+            # Update usage only on success
+            if result:
+                job = self.db.query(Job).filter(Job.id == job_id).first()
+                if job:
+                    await self.update_usage(job.site_id)
+                    print(f"[JOB_SERVICE] Usage updated for site {job.site_id} after successful generation")
             
         except Exception as e:
             print(f"[JOB_SERVICE] Error starting article generation: {e}")

@@ -14,10 +14,10 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str = ""
     OPENAI_TEXT_MODEL: str = "gpt-5"
-    OPENAI_IMAGE_MODEL: str = "dall-e-3"
-    OPENAI_MAX_TOKENS_TEXT: int = 2200
-    OPENAI_TEMPERATURE: float = 1.0
-    OPENAI_TIMEOUT_S: int = 60
+    OPENAI_IMAGE_MODEL: str = "gpt-image-1"
+    OPENAI_MAX_TOKENS_TEXT: int = 4000
+    OPENAI_TEMPERATURE: float = 0.4
+    OPENAI_TIMEOUT_S: int = 120
     
     # Security
     SECRET_KEY: str = "your-secret-key-here"

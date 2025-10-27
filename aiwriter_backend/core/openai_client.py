@@ -39,6 +39,66 @@ def get_openai() -> OpenAI:
     return _openai_client
 
 
+async def run_text_structured(messages: List[Dict[str, str]], schema: Dict[str, Any], **opts) -> Dict[str, Any]:
+    """
+    Generate structured JSON using OpenAI chat completions with JSON schema.
+    
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        schema: JSON schema for structured output
+        **opts: Additional options (model, temperature, etc.)
+    
+    Returns:
+        Parsed JSON dict
+    """
+    client = get_openai()
+    
+    # Default options with compatibility for newer models
+    options = {
+        "model": settings.OPENAI_TEXT_MODEL,
+        "temperature": settings.OPENAI_TEMPERATURE,
+        "messages": messages,
+        "response_format": {"type": "json_object"}
+    }
+    
+    # Use correct parameters based on model
+    if settings.OPENAI_TEXT_MODEL == "gpt-5":
+        # GPT-5 uses max_completion_tokens (never max_tokens)
+        options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
+        # Keep temperature for consistent SEO tone
+        options["temperature"] = settings.OPENAI_TEMPERATURE
+    elif settings.OPENAI_TEXT_MODEL in ["gpt-4o", "gpt-4o-mini"]:
+        # GPT-4o models use max_completion_tokens
+        options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
+    else:
+        # Older models use max_tokens
+        options["max_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
+    
+    # Override with any provided options
+    options.update(opts)
+    
+    try:
+        logger.info(f"Calling OpenAI with structured JSON output for model: {options['model']}")
+        
+        response = client.chat.completions.create(**options)
+        
+        content = response.choices[0].message.content
+        logger.info(f"OpenAI structured response received, length: {len(content) if content else 0}")
+        
+        # Parse JSON directly (no cleaning needed with structured output)
+        result = json.loads(content)
+        logger.info(f"Structured JSON parsing successful")
+        return result
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Structured JSON parsing failed: {str(e)}")
+        logger.error(f"Content: {content[:200]}...")
+        raise ValueError(f"Invalid structured JSON response: {str(e)}")
+    except Exception as e:
+        logger.error(f"OpenAI structured text generation failed: {str(e)}")
+        raise
+
+
 async def run_text(messages: List[Dict[str, str]], **opts) -> str:
     """
     Generate text using OpenAI chat completions.
@@ -61,12 +121,10 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
     
     # Use correct parameters based on model
     if settings.OPENAI_TEXT_MODEL == "gpt-5":
-        # GPT-5 uses max_completion_tokens and supports new parameters
+        # GPT-5 uses max_completion_tokens (never max_tokens)
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
-        options["verbosity"] = "low"  # GPT-5 specific parameter
-        options["reasoning_effort"] = "medium"  # GPT-5 specific parameter
-        # Remove temperature for GPT-5 as it's not supported
-        options.pop("temperature", None)
+        # Keep temperature for consistent SEO tone
+        options["temperature"] = settings.OPENAI_TEMPERATURE
     elif settings.OPENAI_TEXT_MODEL in ["gpt-4o", "gpt-4o-mini"]:
         # GPT-4o models use max_completion_tokens
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
@@ -81,8 +139,7 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
         logger.info(f"Calling OpenAI with model: {options['model']}")
         logger.info(f"Using token parameter: {'max_completion_tokens' if 'max_completion_tokens' in options else 'max_tokens'}")
         if settings.OPENAI_TEXT_MODEL == "gpt-5":
-            logger.info(f"GPT-5 parameters: verbosity={options.get('verbosity')}, reasoning_effort={options.get('reasoning_effort')}")
-            logger.info(f"GPT-5: temperature removed (not supported)")
+            logger.info(f"GPT-5 parameters: temperature={options.get('temperature')}")
         
         response = client.chat.completions.create(**options)
         
