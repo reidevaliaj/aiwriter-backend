@@ -1,10 +1,11 @@
 """
 Base database models - Simplified schema for v1.
 """
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from aiwriter_backend.db.session import Base
+import enum
 
 
 class Plan(Base):
@@ -63,6 +64,8 @@ class Job(Base):
     topic = Column(String, nullable=False)
     length = Column(String, default="medium")  # short, medium, long
     images = Column(Boolean, default=False)  # whether to generate images
+    requested_images = Column(Integer, default=0)  # number of images requested
+    language = Column(String, default="de")  # article language
     status = Column(String, default="pending")  # pending, processing, completed, failed
     error = Column(Text, nullable=True)  # error message if failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -70,6 +73,42 @@ class Job(Base):
     
     # Relationships
     site = relationship("Site", back_populates="jobs")
+    articles = relationship("Article", back_populates="job")
+
+
+class ArticleStatus(enum.Enum):
+    """Article status enum."""
+    DRAFT = "draft"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class Article(Base):
+    """Generated article model."""
+    __tablename__ = "articles"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
+    license_id = Column(Integer, ForeignKey("licenses.id"), nullable=False)
+    topic = Column(Text, nullable=False)
+    language = Column(String, nullable=False, default="de")
+    outline_json = Column(JSON, nullable=True)
+    article_html = Column(Text, nullable=True)
+    meta_title = Column(String(160), nullable=True)
+    meta_description = Column(String(180), nullable=True)
+    faq_json = Column(JSON, nullable=True)
+    schema_json = Column(JSON, nullable=True)
+    image_urls_json = Column(JSON, nullable=True, default=[])
+    tokens_input = Column(Integer, nullable=True)
+    tokens_output = Column(Integer, nullable=True)
+    image_cost_cents = Column(Integer, nullable=True, default=0)
+    status = Column(Enum(ArticleStatus), nullable=False, default=ArticleStatus.READY)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    job = relationship("Job", back_populates="articles")
+    license = relationship("License")
 
 
 class Usage(Base):

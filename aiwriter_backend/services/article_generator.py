@@ -1,232 +1,398 @@
 """
-Simple article generation service for testing.
+Article generation service with OpenAI integration.
 """
-import requests
 import json
+import logging
+import re
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
-from aiwriter_backend.db.base import Job, Site
-from aiwriter_backend.core.security import create_hmac_signature
+
+from aiwriter_backend.db.base import Job, Article, ArticleStatus, Site, License
+from aiwriter_backend.core.openai_client import run_text, gen_image, retry_with_json_prompt
+from aiwriter_backend.services.webhook_service import WebhookService
+
+logger = logging.getLogger(__name__)
+
+# German SEO system prompt
+SYSTEM_PROMPT_DE = (
+    "Du bist ein deutscher SEO-Redakteur. Schreibe faktenbasierte, klare Artikel in professionellem Ton. "
+    "Verwende H2/H3-Überschriften, kurze Absätze (max. 120 Wörter) und Listen, wenn sinnvoll. "
+    "Vermeide Wiederholungen und übertriebene Sprache. Antworte ausschließlich in HTML, ohne Markdown."
+)
 
 
 class ArticleGenerator:
-    """Simple article generator for testing."""
+    """Real OpenAI-powered article generator."""
     
     def __init__(self, db: Session):
         self.db = db
+        self.webhook_service = WebhookService(db)
     
-    async def generate_article(self, job_id: int):
-        """Generate a simple article for testing."""
-        try:
-            print(f"[ARTICLE_GENERATOR] Starting article generation for job {job_id}")
+    async def generate_article(self, job_id: int) -> bool:
+        """
+        Generate a complete article using OpenAI.
+        
+        Args:
+            job_id: Job ID to process
             
-            # Get job details
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get job and related data
             job = self.db.query(Job).filter(Job.id == job_id).first()
             if not job:
-                print(f"[ARTICLE_GENERATOR] ERROR: Job {job_id} not found")
+                logger.error(f"Job {job_id} not found")
                 return False
             
-            # Get site details
             site = self.db.query(Site).filter(Site.id == job.site_id).first()
             if not site:
-                print(f"[ARTICLE_GENERATOR] ERROR: Site not found for job {job_id}")
+                logger.error(f"Site for job {job_id} not found")
                 return False
             
-            print(f"[ARTICLE_GENERATOR] Generating article for topic: {job.topic}")
+            license_obj = self.db.query(License).filter(License.id == site.license_id).first()
+            if not license_obj:
+                logger.error(f"License for job {job_id} not found")
+                return False
             
-            # Create a simple mock article
-            article_data = self._create_mock_article(job.topic, job.length)
+            logger.info(f"Starting article generation for job {job_id}: {job.topic}")
+            
+            # Update job status
+            job.status = "processing"
+            self.db.commit()
+            
+            # Create article record
+            article = Article(
+                job_id=job_id,
+                license_id=license_obj.id,
+                topic=job.topic,
+                language=job.language or "de",
+                status=ArticleStatus.DRAFT
+            )
+            self.db.add(article)
+            self.db.commit()
+            self.db.refresh(article)
+            
+            # Generate article components
+            context = {
+                "topic": job.topic,
+                "length": job.length,
+                "language": job.language or "de",
+                "article_id": article.id
+            }
+            
+            # Step 1: Create outline
+            logger.info(f"Creating outline for article {article.id}")
+            outline = await self.create_outline(**context)
+            article.outline_json = outline
+            
+            # Step 2: Write sections
+            logger.info(f"Writing sections for article {article.id}")
+            sections_html = await self.write_sections(outline, **context)
+            
+            # Step 3: Write intro and conclusion
+            logger.info(f"Writing intro/conclusion for article {article.id}")
+            intro_html = await self.write_intro_and_conclusion(outline, **context)
+            
+            # Step 4: Generate FAQ
+            logger.info(f"Generating FAQ for article {article.id}")
+            faq_data = await self.generate_faq(outline, **context)
+            article.faq_json = faq_data
+            
+            # Step 5: Generate meta
+            logger.info(f"Generating meta for article {article.id}")
+            meta_data = await self.generate_meta(outline, **context)
+            article.meta_title = meta_data["title"]
+            article.meta_description = meta_data["description"]
+            
+            # Step 6: Generate schema
+            logger.info(f"Generating schema for article {article.id}")
+            schema_data = await self.generate_schema(outline, faq_data, **context)
+            article.schema_json = schema_data
+            
+            # Step 7: Assemble HTML
+            logger.info(f"Assembling HTML for article {article.id}")
+            full_html = await self.assemble_html(intro_html, sections_html, **context)
+            article.article_html = full_html
+            
+            # Step 8: Generate images (if requested)
+            if job.requested_images and job.requested_images > 0:
+                logger.info(f"Generating {job.requested_images} images for article {article.id}")
+                image_urls = await self.generate_images(job.topic, job.requested_images)
+                article.image_urls_json = image_urls
+                # Calculate image cost (assuming $0.04 per image for DALL-E 3)
+                article.image_cost_cents = len(image_urls) * 4
+            
+            # Update article status
+            article.status = ArticleStatus.READY
+            article.updated_at = datetime.utcnow()
             
             # Update job status
             job.status = "completed"
-            job.finished_at = datetime.now()
+            job.finished_at = datetime.utcnow()
+            
             self.db.commit()
             
-            print(f"[ARTICLE_GENERATOR] Article generated successfully")
+            logger.info(f"Article {article.id} generated successfully")
             
             # Send to WordPress
-            success = await self._send_to_wordpress(site, job_id, article_data)
+            await self.webhook_service.send_article_to_wordpress(article.id)
             
-            if success:
-                print(f"[ARTICLE_GENERATOR] Article sent to WordPress successfully")
-            else:
-                print(f"[ARTICLE_GENERATOR] Failed to send article to WordPress")
-                job.status = "failed"
-                job.error = "Failed to send to WordPress"
-                self.db.commit()
-            
-            return success
+            return True
             
         except Exception as e:
-            print(f"[ARTICLE_GENERATOR] ERROR: {str(e)}")
+            logger.error(f"Article generation failed for job {job_id}: {str(e)}")
+            
             # Update job status
             job = self.db.query(Job).filter(Job.id == job_id).first()
             if job:
                 job.status = "failed"
                 job.error = str(e)
+                job.finished_at = datetime.utcnow()
                 self.db.commit()
+            
+            # Update article status if it exists
+            article = self.db.query(Article).filter(Article.job_id == job_id).first()
+            if article:
+                article.status = ArticleStatus.FAILED
+                article.updated_at = datetime.utcnow()
+                self.db.commit()
+            
             return False
     
-    def _create_mock_article(self, topic: str, length: str) -> dict:
-        """Create a simple mock article."""
-        word_count = {
-            "short": 500,
-            "medium": 800,
-            "long": 1200
-        }.get(length, 800)
+    async def create_outline(self, topic: str, length: str, language: str, **kwargs) -> Dict[str, Any]:
+        """Create article outline with H2/H3 structure."""
+        length_guidance = {
+            "short": "3-4 H2 sections",
+            "medium": "5-6 H2 sections", 
+            "long": "7-8 H2 sections"
+        }
         
-        # Create a simple article structure
-        title = f"Complete Guide to {topic.title()}"
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {
+                "role": "user", 
+                "content": f"""Erstelle eine detaillierte Gliederung für einen Artikel zum Thema "{topic}".
+
+Länge: {length_guidance.get(length, "5-6 H2 sections")}
+
+Antworte mit einem JSON-Objekt:
+{{
+  "title": "Artikel-Titel",
+  "sections": [
+    {{
+      "h2": "Hauptüberschrift",
+      "h3s": ["Unterüberschrift 1", "Unterüberschrift 2"]
+    }}
+  ]
+}}
+
+Stelle sicher, dass die Gliederung SEO-optimiert und strukturiert ist."""
+            }
+        ]
         
-        content = f"""
-        <h2>Introduction to {topic}</h2>
-        <p>Welcome to our comprehensive guide about {topic}. This article will provide you with all the essential information you need to understand and master this topic.</p>
+        result = await retry_with_json_prompt(messages, "outline")
+        return result
+    
+    async def write_sections(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
+        """Write article sections based on outline."""
+        sections_html = []
         
-        <h2>What is {topic}?</h2>
-        <p>{topic} is an important subject that many people are interested in learning about. In this section, we'll explore the fundamental concepts and principles.</p>
+        for section in outline.get("sections", []):
+            h2 = section.get("h2", "")
+            h3s = section.get("h3s", [])
+            
+            # Generate content for this section
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT_DE},
+                {
+                    "role": "user",
+                    "content": f"""Schreibe den Inhalt für den Abschnitt "{h2}" des Artikels zum Thema "{topic}".
+
+Unterüberschriften: {', '.join(h3s) if h3s else 'Keine'}
+
+Antworte in reinem HTML mit:
+- <h2>{h2}</h2>
+- <h3>Unterüberschrift</h3> für jede Unterüberschrift
+- <p>Absätze</p> mit max. 120 Wörtern
+- <ul><li>Listen</li></ul> oder <ol><li>Nummerierte Listen</li></ol> wenn sinnvoll
+
+Verwende keine Inline-CSS oder andere Formatierung."""
+                }
+            ]
+            
+            content = await run_text(messages)
+            sections_html.append(content)
         
-        <h2>Key Benefits of {topic}</h2>
-        <p>There are several advantages to understanding {topic}:</p>
-        <ul>
-            <li>Improved knowledge and understanding</li>
-            <li>Better decision-making capabilities</li>
-            <li>Enhanced problem-solving skills</li>
-        </ul>
+        return "\n\n".join(sections_html)
+    
+    async def write_intro_and_conclusion(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
+        """Write introduction and conclusion paragraphs."""
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {
+                "role": "user",
+                "content": f"""Schreibe eine Einleitung und einen Schluss für den Artikel zum Thema "{topic}".
+
+Antworte in reinem HTML:
+- <p>Einleitungsparagraph (max. 120 Wörter)</p>
+- <p>Schlussparagraph (max. 120 Wörter)</p>
+
+Die Einleitung soll das Thema einführen und den Leser fesseln.
+Der Schluss soll die wichtigsten Punkte zusammenfassen."""
+            }
+        ]
         
-        <h2>How to Get Started with {topic}</h2>
-        <p>Getting started with {topic} is easier than you might think. Here are some practical steps:</p>
-        <ol>
-            <li>Research and gather information</li>
-            <li>Practice and apply what you learn</li>
-            <li>Seek guidance from experts</li>
-        </ol>
+        content = await run_text(messages)
+        return content
+    
+    async def generate_faq(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> List[Dict[str, str]]:
+        """Generate FAQ questions and answers."""
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {
+                "role": "user",
+                "content": f"""Erstelle 3-5 häufig gestellte Fragen zum Thema "{topic}".
+
+Antworte mit einem JSON-Array:
+[
+  {{"q": "Frage", "a": "Antwort (max. 80-100 Wörter)"}},
+  {{"q": "Frage", "a": "Antwort (max. 80-100 Wörter)"}}
+]
+
+Die Fragen sollen relevant und die Antworten präzise sein."""
+            }
+        ]
         
-        <h2>Common Challenges and Solutions</h2>
-        <p>When working with {topic}, you might encounter some challenges. Here are common issues and their solutions:</p>
-        <p>Challenge 1: Understanding complex concepts<br>
-        Solution: Break down information into smaller, manageable parts.</p>
+        result = await retry_with_json_prompt(messages, "FAQ")
+        return result
+    
+    async def generate_meta(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> Dict[str, str]:
+        """Generate meta title and description."""
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {
+                "role": "user",
+                "content": f"""Erstelle Meta-Titel und Meta-Beschreibung für den Artikel zum Thema "{topic}".
+
+Antworte mit einem JSON-Objekt:
+{{
+  "title": "Meta-Titel (max. 60 Zeichen)",
+  "description": "Meta-Beschreibung (max. 155 Zeichen)"
+}}
+
+Beide sollen SEO-optimiert und ansprechend sein."""
+            }
+        ]
         
-        <h2>Conclusion</h2>
-        <p>In conclusion, {topic} is a valuable subject that can provide significant benefits. By following the guidelines in this article, you'll be well on your way to mastering this topic.</p>
-        """
+        result = await retry_with_json_prompt(messages, "meta")
+        return result
+    
+    async def generate_schema(self, outline: Dict[str, Any], faq_data: List[Dict[str, str]], topic: str, length: str, language: str, **kwargs) -> Dict[str, Any]:
+        """Generate structured data schema."""
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_DE},
+            {
+                "role": "user",
+                "content": f"""Erstelle strukturierte Daten (Schema.org) für den Artikel zum Thema "{topic}".
+
+Antworte mit einem JSON-Objekt:
+{{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "Artikel-Titel",
+  "datePublished": "{datetime.now().isoformat()}",
+  "inLanguage": "{language}",
+  "mainEntityOfPage": {{
+    "@type": "WebPage",
+    "@id": "https://example.com/article"
+  }},
+  "author": {{
+    "@type": "Organization",
+    "name": "AIWriter"
+  }},
+  "publisher": {{
+    "@type": "Organization",
+    "name": "AIWriter"
+  }}
+}}
+
+Falls FAQ vorhanden sind, füge auch ein FAQPage-Schema hinzu."""
+            }
+        ]
         
-        return {
-            "title": title,
-            "content_html": content,
-            "meta_title": f"{title} - Complete Guide",
-            "meta_description": f"Learn everything about {topic} with our comprehensive guide. Get expert tips and practical advice.",
-            "faq_schema": json.dumps({
+        result = await retry_with_json_prompt(messages, "schema")
+        
+        # Add FAQ schema if we have FAQ data
+        if faq_data:
+            faq_schema = {
                 "@context": "https://schema.org",
                 "@type": "FAQPage",
                 "mainEntity": [
                     {
                         "@type": "Question",
-                        "name": f"What is {topic}?",
+                        "name": item["q"],
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": f"{topic} is an important subject that provides valuable knowledge and skills."
+                            "text": item["a"]
                         }
                     }
+                    for item in faq_data
                 ]
-            }),
-            "featured_image_url": None
-        }
-    
-    async def _send_to_wordpress(self, site: Site, job_id: int, article_data: dict) -> bool:
-        """Send article to WordPress via webhook."""
-        try:
-            # Create HMAC signature
-            signature = create_hmac_signature(site.site_secret, json.dumps(article_data))
-            
-            # Use stored callback URL or fallback to constructed URL
-            if site.callback_url:
-                webhook_url = site.callback_url
-                print(f"[ARTICLE_GENERATOR] Using stored callback URL: {webhook_url}")
-            else:
-                # Fallback to constructed URL
-                if site.domain.startswith('http'):
-                    webhook_url = f"{site.domain}/wp-json/aiwriter/v1/publish"
-                else:
-                    webhook_url = f"https://{site.domain}/wp-json/aiwriter/v1/publish"
-                print(f"[ARTICLE_GENERATOR] Using fallback URL: {webhook_url}")
-            
-            payload = {
-                "site_id": site.id,
-                "job_id": job_id,
-                "article_data": article_data,
-                "signature": signature
             }
-            
-            print(f"[ARTICLE_GENERATOR] Sending to WordPress: {webhook_url}")
-            print(f"[ARTICLE_GENERATOR] Payload: {json.dumps(payload, indent=2)}")
-            
-            response = requests.post(
-                webhook_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
-            
-            print(f"[ARTICLE_GENERATOR] WordPress response status: {response.status_code}")
-            print(f"[ARTICLE_GENERATOR] WordPress response body: {response.text}")
-            
-            if response.status_code == 200:
-                print(f"[ARTICLE_GENERATOR] WordPress response: {response.json()}")
-                return True
-            elif response.status_code == 404:
-                # Try fallback URL if we got 404
-                return await self._try_fallback_url(site, job_id, article_data, signature, webhook_url)
-            else:
-                print(f"[ARTICLE_GENERATOR] WordPress error: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            print(f"[ARTICLE_GENERATOR] Error sending to WordPress: {str(e)}")
-            return False
+            result["faq"] = faq_schema
+        
+        return result
     
-    async def _try_fallback_url(self, site, job_id, article_data, signature, original_url):
-        """Try fallback URL if original URL returns 404."""
-        try:
-            # Determine fallback URL
-            if '/wp-json/' in original_url:
-                # Try with ?rest_route= format
-                fallback_url = original_url.replace('/wp-json/aiwriter/v1/publish', '/?rest_route=/aiwriter/v1/publish')
-            elif '?rest_route=' in original_url:
-                # Try with /wp-json/ format
-                fallback_url = original_url.replace('/?rest_route=/aiwriter/v1/publish', '/wp-json/aiwriter/v1/publish')
-            else:
-                print(f"[ARTICLE_GENERATOR] No fallback URL available for: {original_url}")
-                return False
-            
-            print(f"[ARTICLE_GENERATOR] Trying fallback URL: {fallback_url}")
-            
-            payload = {
-                "site_id": site.id,
-                "job_id": job_id,
-                "article_data": article_data,
-                "signature": signature
-            }
-            
-            response = requests.post(
-                fallback_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
-            
-            print(f"[ARTICLE_GENERATOR] Fallback response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print(f"[ARTICLE_GENERATOR] Fallback successful: {response.json()}")
-                # Update stored callback URL for future use
-                site.callback_url = fallback_url
-                self.db.commit()
-                print(f"[ARTICLE_GENERATOR] Updated callback URL to: {fallback_url}")
-                return True
-            else:
-                print(f"[ARTICLE_GENERATOR] Fallback failed: {response.status_code} - {response.text}")
-                return False
+    async def assemble_html(self, intro_html: str, sections_html: str, topic: str, length: str, language: str, **kwargs) -> str:
+        """Assemble final HTML article."""
+        # Combine intro, sections, and conclusion
+        full_html = f"{intro_html}\n\n{sections_html}"
+        
+        # Clean up HTML
+        full_html = self._clean_html(full_html)
+        
+        return full_html
+    
+    async def generate_images(self, topic: str, requested_images: int) -> List[str]:
+        """Generate images for the article."""
+        if requested_images <= 0:
+            return []
+        
+        image_urls = []
+        
+        for i in range(requested_images):
+            try:
+                prompt = f"Sachliche, moderne Titelillustration zum Thema „{topic}“, flache Illustration, kein Text, neutraler Hintergrund."
                 
-        except Exception as e:
-            print(f"[ARTICLE_GENERATOR] Fallback error: {str(e)}")
-            return False
+                image_url = await gen_image(
+                    prompt=prompt,
+                    size="1024x1024",
+                    quality="high"
+                )
+                
+                image_urls.append(image_url)
+                logger.info(f"Generated image {i+1}/{requested_images}: {image_url}")
+                
+            except Exception as e:
+                logger.error(f"Image generation failed for image {i+1}: {str(e)}")
+                # Continue with other images
+                continue
+        
+        return image_urls
+    
+    def _clean_html(self, html: str) -> str:
+        """Clean and sanitize HTML content."""
+        # Remove any inline CSS
+        html = re.sub(r'style="[^"]*"', '', html)
+        
+        # Ensure proper heading hierarchy
+        html = re.sub(r'<h([1-6])>', lambda m: f'<h{int(m.group(1)) + 1}>', html)
+        
+        # Remove any risky tags
+        risky_tags = ['script', 'iframe', 'object', 'embed']
+        for tag in risky_tags:
+            html = re.sub(f'<{tag}[^>]*>.*?</{tag}>', '', html, flags=re.IGNORECASE | re.DOTALL)
+        
+        return html.strip()

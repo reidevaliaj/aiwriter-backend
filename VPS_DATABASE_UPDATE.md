@@ -103,3 +103,4 @@ sudo -u postgres psql -d aiwriter -c "SELECT 1;"
 ```
 
 The database update will enable proper WordPress REST API communication! 🚀
+

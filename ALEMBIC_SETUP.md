@@ -57,3 +57,4 @@ sudo systemctl restart aiwriter
 ## 🔧 **Manual Migration Creation**
 
 Since Alembic isn't working locally, let me create the migration manually:
+

@@ -37,3 +37,4 @@ sudo systemctl status aiwriter --no-pager
 
 echo "✅ Database update complete!"
 echo "🌐 Backend should be running at: http://142.93.161.58"
+

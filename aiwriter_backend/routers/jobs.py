@@ -30,7 +30,8 @@ async def create_job(
         site_id=x_site_id,
         topic=request.topic,
         length=request.length,
-        include_images=request.include_images
+        include_images=request.include_images,
+        language=getattr(request, 'language', 'de')
     )
     
     print(f"[JOB_ROUTER] Job creation result: {result.success}, Message: {result.message}")

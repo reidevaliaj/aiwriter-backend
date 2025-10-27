@@ -14,7 +14,7 @@ class JobService:
     def __init__(self, db: Session):
         self.db = db
     
-    async def create_job(self, site_id: int, topic: str, length: str = "medium", include_images: bool = False) -> JobResponse:
+    async def create_job(self, site_id: int, topic: str, length: str = "medium", include_images: bool = False, language: str = "de") -> JobResponse:
         """Create a new article generation job."""
         try:
             print(f"[JOB_SERVICE] Creating job - Site ID: {site_id}, Topic: {topic}, Length: {length}, Include Images: {include_images}")
@@ -63,12 +63,21 @@ class JobService:
             else:
                 print(f"[JOB_SERVICE] No image generation requested, skipping image quota check")
             
+            # Determine number of images to request
+            requested_images = 0
+            if include_images:
+                plan = self.db.query(Plan).filter(Plan.id == license_obj.plan_id).first()
+                if plan:
+                    requested_images = min(plan.max_images_per_article, 2)  # Cap at 2 for now
+            
             # Create job
             job = Job(
                 site_id=site_id,
                 topic=topic,
                 length=length,
                 images=include_images,
+                requested_images=requested_images,
+                language=language,
                 status="pending"
             )
             

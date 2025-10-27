@@ -24,3 +24,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Remove callback_url column from sites table
     op.drop_column('sites', 'callback_url')
+
