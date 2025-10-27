@@ -1,3 +1,23 @@
+#!/bin/bash
+
+# Quick fix for GPT-5 temperature parameter issue
+echo "🔧 Fixing GPT-5 temperature parameter..."
+
+cd /home/rei/apps/aiwriter-backend
+
+# Backup current files
+cp aiwriter_backend/core/config.py aiwriter_backend/core/config.py.backup.temp
+cp aiwriter_backend/core/openai_client.py aiwriter_backend/core/openai_client.py.backup.temp
+
+echo "✅ Backups created"
+
+# Fix config.py - set temperature to 1.0 for GPT-5
+echo "🔧 Updating config.py..."
+sed -i 's/OPENAI_TEMPERATURE: float = 0.4/OPENAI_TEMPERATURE: float = 1.0/' aiwriter_backend/core/config.py
+
+# Fix openai_client.py - remove temperature for GPT-5
+echo "🔧 Updating openai_client.py..."
+cat > aiwriter_backend/core/openai_client.py << 'EOF'
 """
 OpenAI client singleton and helper functions.
 """
@@ -319,3 +339,26 @@ async def retry_with_json_prompt(messages: List[Dict[str, str]], context: str = 
             except Exception as final_error:
                 logger.error(f"Final attempt failed for {context}: {str(final_error)}")
                 raise ValueError(f"Failed to get valid JSON for {context} after all attempts: {str(final_error)}")
+EOF
+
+echo "✅ OpenAI client updated with correct GPT-5 temperature handling"
+
+# Restart the backend service
+echo "🔄 Restarting backend service..."
+sudo systemctl restart aiwriter
+
+# Check service status
+echo "📊 Checking service status..."
+sleep 3
+sudo systemctl status aiwriter --no-pager
+
+echo ""
+echo "✅ GPT-5 temperature fix deployed successfully!"
+echo ""
+echo "🔍 What was fixed:"
+echo "- GPT-5 temperature parameter removed (only supports default 1.0)"
+echo "- Config updated to use temperature 1.0"
+echo "- OpenAI client updated to handle GPT-5 correctly"
+echo ""
+echo "🧪 Test article generation again - should work now!"
+echo "📝 Monitor logs with: sudo journalctl -u aiwriter -f"
