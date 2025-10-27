@@ -176,6 +176,29 @@ def validate_json_response(content: str, context: str = "") -> Dict[str, Any]:
         if not content:
             raise ValueError(f"Empty content after cleaning for {context}")
         
+        # Try to find JSON object boundaries if content is malformed
+        if not content.startswith('{') and not content.startswith('['):
+            # Look for first { or [
+            start_idx = max(content.find('{'), content.find('['))
+            if start_idx != -1:
+                content = content[start_idx:]
+        
+        # Try to find the end of the JSON object
+        if content.startswith('{'):
+            # Count braces to find the end
+            brace_count = 0
+            end_idx = -1
+            for i, char in enumerate(content):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            if end_idx != -1:
+                content = content[:end_idx]
+        
         # Parse JSON
         result = json.loads(content)
         logger.info(f"JSON validation successful for {context}")
@@ -219,4 +242,23 @@ async def retry_with_json_prompt(messages: List[Dict[str, str]], context: str = 
             return validate_json_response(content, f"{context} (retry)")
         except Exception as retry_error:
             logger.error(f"Retry failed for {context}: {str(retry_error)}")
-            raise ValueError(f"Failed to get valid JSON for {context} after retry: {str(retry_error)}")
+            
+            # Final attempt with even more explicit instructions
+            logger.info(f"Final attempt with explicit JSON instructions for {context}")
+            final_messages = [
+                {
+                    "role": "system",
+                    "content": "You must respond with valid JSON only. No text before or after the JSON. No explanations. No HTML tags. Just the JSON object."
+                },
+                {
+                    "role": "user",
+                    "content": "Return valid JSON only. No commentary, no HTML tags, no explanations. Just the JSON object."
+                }
+            ]
+            
+            try:
+                content = await run_text(final_messages)
+                return validate_json_response(content, f"{context} (final)")
+            except Exception as final_error:
+                logger.error(f"Final attempt failed for {context}: {str(final_error)}")
+                raise ValueError(f"Failed to get valid JSON for {context} after all attempts: {str(final_error)}")
