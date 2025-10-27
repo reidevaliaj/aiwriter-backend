@@ -159,6 +159,15 @@ def validate_json_response(content: str, context: str = "") -> Dict[str, Any]:
             end = content.find("```", start)
             if end != -1:
                 content = content[start:end].strip()
+        elif "<pre>" in content:
+            # Handle <pre> tags (GPT-5 sometimes uses these)
+            start = content.find("<pre>") + 5
+            end = content.find("</pre>", start)
+            if end != -1:
+                content = content[start:end].strip()
+        
+        # Clean up any remaining HTML tags or extra whitespace
+        content = content.replace('<pre>', '').replace('</pre>', '').strip()
         
         # Parse JSON
         result = json.loads(content)
