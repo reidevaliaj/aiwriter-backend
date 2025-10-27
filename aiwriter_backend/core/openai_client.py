@@ -21,10 +21,19 @@ def get_openai() -> OpenAI:
         if not settings.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY is required but not set")
         
-        _openai_client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            timeout=settings.OPENAI_TIMEOUT_S
-        )
+        # Initialize OpenAI client with compatibility check
+        try:
+            _openai_client = OpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                timeout=settings.OPENAI_TIMEOUT_S
+            )
+        except TypeError as e:
+            if "unexpected keyword argument" in str(e):
+                # Fallback for older OpenAI SDK versions
+                logger.warning("Using fallback OpenAI client initialization (older SDK version)")
+                _openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            else:
+                raise
         logger.info(f"OpenAI client initialized with model: {settings.OPENAI_TEXT_MODEL}")
     
     return _openai_client
