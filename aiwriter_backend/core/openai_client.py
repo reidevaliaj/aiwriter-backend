@@ -169,6 +169,13 @@ def validate_json_response(content: str, context: str = "") -> Dict[str, Any]:
         # Clean up any remaining HTML tags or extra whitespace
         content = content.replace('<pre>', '').replace('</pre>', '').strip()
         
+        # Remove any leading/trailing whitespace and newlines
+        content = content.strip()
+        
+        # If content is empty after cleaning, raise an error
+        if not content:
+            raise ValueError(f"Empty content after cleaning for {context}")
+        
         # Parse JSON
         result = json.loads(content)
         logger.info(f"JSON validation successful for {context}")
@@ -196,16 +203,20 @@ async def retry_with_json_prompt(messages: List[Dict[str, str]], context: str = 
         content = await run_text(messages)
         return validate_json_response(content, context)
         
-    except ValueError:
+    except ValueError as e:
         # Retry with JSON-only prompt
-        logger.info(f"Retrying with JSON-only prompt for {context}")
+        logger.info(f"Retrying with JSON-only prompt for {context}: {str(e)}")
         
         retry_messages = messages + [
             {
                 "role": "user",
-                "content": "Return valid JSON only. No commentary."
+                "content": "Return valid JSON only. No commentary, no HTML tags, no explanations. Just the JSON object."
             }
         ]
         
-        content = await run_text(retry_messages)
-        return validate_json_response(content, f"{context} (retry)")
+        try:
+            content = await run_text(retry_messages)
+            return validate_json_response(content, f"{context} (retry)")
+        except Exception as retry_error:
+            logger.error(f"Retry failed for {context}: {str(retry_error)}")
+            raise ValueError(f"Failed to get valid JSON for {context} after retry: {str(retry_error)}")
