@@ -40,6 +40,16 @@ class ArticleGenerator:
             True if successful, False otherwise
         """
         try:
+            print(f"[ARTICLE_GENERATOR] Starting article generation for job {job_id}")
+            
+            # Check OpenAI API key
+            from aiwriter_backend.core.config import settings
+            if not settings.OPENAI_API_KEY:
+                print(f"[ARTICLE_GENERATOR] ERROR: OpenAI API key not set")
+                return False
+            
+            print(f"[ARTICLE_GENERATOR] OpenAI API key is set, using model: {settings.OPENAI_TEXT_MODEL}")
+            
             # Get job and related data
             job = self.db.query(Job).filter(Job.id == job_id).first()
             if not job:

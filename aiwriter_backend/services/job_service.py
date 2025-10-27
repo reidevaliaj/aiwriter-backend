@@ -187,8 +187,17 @@ class JobService:
     async def _start_article_generation(self, job_id: int):
         """Start article generation for a job."""
         try:
+            print(f"[JOB_SERVICE] Starting article generation for job {job_id}")
             from aiwriter_backend.services.article_generator import ArticleGenerator
+            print(f"[JOB_SERVICE] ArticleGenerator imported successfully")
+            
             generator = ArticleGenerator(self.db)
-            await generator.generate_article(job_id)
+            print(f"[JOB_SERVICE] ArticleGenerator instance created")
+            
+            result = await generator.generate_article(job_id)
+            print(f"[JOB_SERVICE] Article generation completed with result: {result}")
+            
         except Exception as e:
             print(f"[JOB_SERVICE] Error starting article generation: {e}")
+            import traceback
+            traceback.print_exc()
