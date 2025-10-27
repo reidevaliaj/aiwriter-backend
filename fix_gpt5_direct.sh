@@ -1,3 +1,27 @@
+#!/bin/bash
+# Direct fix for GPT-5 max_tokens issue on VPS
+
+# Configuration
+APP_DIR="/home/rei/apps/aiwriter-backend"
+SERVICE_NAME="aiwriter"
+
+echo "--- Applying Direct GPT-5 Fix ---"
+
+# 1. Navigate to application directory
+echo "Navigating to $APP_DIR..."
+cd $APP_DIR || { echo "Error: Could not change to $APP_DIR. Exiting."; exit 1; }
+
+# 2. Activate virtual environment
+echo "Activating virtual environment..."
+source venv/bin/activate || { echo "Error: Could not activate venv. Exiting."; exit 1; }
+
+# 3. Backup the original file
+echo "Backing up original openai_client.py..."
+cp aiwriter_backend/core/openai_client.py aiwriter_backend/core/openai_client.py.backup
+
+# 4. Apply the fix directly
+echo "Applying GPT-5 parameter fix..."
+cat > aiwriter_backend/core/openai_client.py << 'EOF'
 """
 OpenAI client singleton and helper functions.
 """
@@ -59,14 +83,12 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
         "messages": messages
     }
     
-    # Use correct parameters based on model
+    # Use correct token parameter based on model
     if settings.OPENAI_TEXT_MODEL == "gpt-5":
         # GPT-5 uses max_completion_tokens and supports new parameters
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
         options["verbosity"] = "minimal"  # GPT-5 specific parameter
         options["reasoning_effort"] = "medium"  # GPT-5 specific parameter
-        # GPT-5 only supports default temperature (1.0)
-        options["temperature"] = 1.0
     elif settings.OPENAI_TEXT_MODEL in ["gpt-4o", "gpt-4o-mini"]:
         # GPT-4o models use max_completion_tokens
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
@@ -199,3 +221,22 @@ async def retry_with_json_prompt(messages: List[Dict[str, str]], context: str = 
         
         content = await run_text(retry_messages)
         return validate_json_response(content, f"{context} (retry)")
+EOF
+
+# 5. Set environment variables
+echo "Setting GPT-5 environment variables..."
+export OPENAI_TEXT_MODEL="gpt-5"
+export OPENAI_IMAGE_MODEL="dall-e-3"
+
+# 6. Restart the systemd service
+echo "Restarting $SERVICE_NAME service..."
+sudo systemctl restart $SERVICE_NAME || { echo "Error: Could not restart $SERVICE_NAME. Exiting."; exit 1; }
+
+# 7. Check service status
+echo "Checking $SERVICE_NAME service status..."
+sudo systemctl status $SERVICE_NAME --no-pager
+
+echo "--- GPT-5 Fix Applied ---"
+echo "The max_tokens error should now be fixed!"
+echo "Try generating an article and check logs:"
+echo "sudo journalctl -u $SERVICE_NAME -f"
