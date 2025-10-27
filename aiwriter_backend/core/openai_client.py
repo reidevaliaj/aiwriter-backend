@@ -63,10 +63,10 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
     if settings.OPENAI_TEXT_MODEL == "gpt-5":
         # GPT-5 uses max_completion_tokens and supports new parameters
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
-        options["verbosity"] = "minimal"  # GPT-5 specific parameter
+        options["verbosity"] = "low"  # GPT-5 specific parameter
         options["reasoning_effort"] = "medium"  # GPT-5 specific parameter
-        # GPT-5 only supports default temperature (1.0)
-        options["temperature"] = 1.0
+        # Remove temperature for GPT-5 as it's not supported
+        options.pop("temperature", None)
     elif settings.OPENAI_TEXT_MODEL in ["gpt-4o", "gpt-4o-mini"]:
         # GPT-4o models use max_completion_tokens
         options["max_completion_tokens"] = settings.OPENAI_MAX_TOKENS_TEXT
@@ -82,6 +82,7 @@ async def run_text(messages: List[Dict[str, str]], **opts) -> str:
         logger.info(f"Using token parameter: {'max_completion_tokens' if 'max_completion_tokens' in options else 'max_tokens'}")
         if settings.OPENAI_TEXT_MODEL == "gpt-5":
             logger.info(f"GPT-5 parameters: verbosity={options.get('verbosity')}, reasoning_effort={options.get('reasoning_effort')}")
+            logger.info(f"GPT-5: temperature removed (not supported)")
         
         response = client.chat.completions.create(**options)
         
