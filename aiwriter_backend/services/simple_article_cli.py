@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from openai import OpenAI
+from aiwriter_backend.core.config import settings
 
 # ---------- Config ----------
 DEFAULT_TOPIC = "best tools for camping in the snow"
@@ -31,10 +32,11 @@ fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
 fh.setFormatter(_log_fmt)
 logger.addHandler(ch)
 logger.addHandler(fh)
+        
 
 # ---------- Helpers ----------
 def ensure_key() -> str:
-    key = os.getenv("OPENAI_API_KEY", "").strip()
+    key = settings.OPENAI_API_KEY
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set.")
     return key
