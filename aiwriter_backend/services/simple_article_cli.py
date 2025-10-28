@@ -6,9 +6,10 @@ import json
 import argparse
 import logging
 import sys
+import re
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from openai import OpenAI
 from aiwriter_backend.core.config import settings
@@ -17,7 +18,7 @@ from aiwriter_backend.core.config import settings
 DEFAULT_TOPIC = "best tools for camping in the snow"
 DEFAULT_LANGUAGE = "de"       # change to "en" if you want English
 DEFAULT_LENGTH = "medium"     # short | medium | long
-DEFAULT_TEMPERATURE = 1.0     # GPT-5 only allows the default; anything else will be omitted
+DEFAULT_TEMPERATURE = 1.0     # GPT-5 only allows default=1; any other value is omitted
 MODEL = "gpt-5"               # uses max_completion_tokens (not max_tokens)
 
 # ---------- Logging ----------
@@ -53,25 +54,124 @@ def length_hint(length: str) -> str:
     return mapping.get(length, mapping["medium"])
 
 
-def validate_minimal_shape(data: Dict[str, Any]) -> None:
+def _extract_first_heading(html: str) -> Optional[str]:
+    if not isinstance(html, str):
+        return None
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.I | re.S)
+    if not m:
+        m = re.search(r"<h2[^>]*>(.*?)</h2>", html, flags=re.I | re.S)
+    if not m:
+        return None
+    # strip tags inside heading
+    text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+    return text or None
+
+
+def _get_first(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[Any]:
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return None
+
+
+def normalize_and_coerce(raw: Dict[str, Any], topic_fallback: str, language: str) -> Dict[str, Any]:
     """
-    Minimal sanity check (no external deps).
-    Ensures the fields we rely on exist and are strings.
+    Make the model's JSON usable even if keys differ.
+    - Handles common synonyms / languages (title/titel/headline, content/html/article_html, etc.)
+    - Ensures faq is a list and schema is an object
+    - Builds fallbacks for missing title and schema
     """
-    if not isinstance(data, dict):
+    if not isinstance(raw, dict):
         raise ValueError("Model did not return a JSON object.")
-    if "title" not in data or not isinstance(data["title"], str):
-        raise ValueError("Missing or invalid 'title'.")
-    if "article_html" not in data or not isinstance(data["article_html"], str):
+
+    # Flatten one level if the model wrapped everything: {"article": {...}}
+    candidate = raw
+    for wrap_key in ("article", "result", "data", "payload", "content"):
+        if isinstance(raw.get(wrap_key), dict):
+            candidate = raw[wrap_key]
+            break
+
+    # Create a case-insensitive view of keys
+    lower_map = {k.lower(): k for k in candidate.keys()}
+    def get_ci(*names: str) -> Optional[Any]:
+        for name in names:
+            k = lower_map.get(name.lower())
+            if k is not None:
+                return candidate[k]
+        return None
+
+    # Title candidates
+    title = get_ci("title", "titel", "headline", "article_title", "artikel_titel")
+    # Article HTML candidates
+    article_html = get_ci("article_html", "html", "content_html", "content", "article")
+
+    # Meta can be object or split fields
+    meta = get_ci("meta", "metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        mt = get_ci("meta_title", "metatitle", "seo_title")
+        md = get_ci("meta_description", "metadescription", "seo_description", "description")
+        if mt or md:
+            if mt:
+                meta["title"] = mt
+            if md:
+                meta["description"] = md
+
+    # FAQ candidates
+    faq = get_ci("faq", "faqs", "faq_list")
+    if faq is None:
+        faq = []
+    if isinstance(faq, dict):
+        # Sometimes {"items":[...]} or {"list":[...]}
+        faq = _get_first(faq, ("items", "list", "entries")) or []
+    if not isinstance(faq, list):
+        faq = []
+
+    # Schema candidates
+    schema = get_ci("schema", "jsonld", "json_ld", "structured_data", "schema_org")
+    if not isinstance(schema, dict):
+        schema = {}
+
+    # Fallbacks
+    if not title:
+        # try meta.title
+        if isinstance(meta, dict) and isinstance(meta.get("title"), str) and meta["title"].strip():
+            title = meta["title"].strip()
+        # try heading in html
+        if not title and isinstance(article_html, str):
+            title = _extract_first_heading(article_html)
+        # final fallback
+        if not title:
+            title = topic_fallback
+
+    if not isinstance(article_html, str) or not article_html.strip():
         raise ValueError("Missing or invalid 'article_html'.")
-    if "meta" not in data or not isinstance(data["meta"], dict):
-        raise ValueError("Missing or invalid 'meta'.")
-    if "title" not in data["meta"] or "description" not in data["meta"]:
-        raise ValueError("Missing 'meta.title' or 'meta.description'.")
-    if "faq" in data and not isinstance(data["faq"], list):
-        raise ValueError("'faq' must be a list when present.")
-    if "schema" in data and not isinstance(data["schema"], dict):
-        raise ValueError("'schema' must be an object when present.")
+
+    # Ensure meta has both fields with limits
+    meta_title = meta.get("title") if isinstance(meta, dict) else None
+    meta_desc = meta.get("description") if isinstance(meta, dict) else None
+    if not isinstance(meta_title, str) or not meta_title.strip():
+        meta_title = title[:60]
+    if not isinstance(meta_desc, str) or not meta_desc.strip():
+        meta_desc = f"Erfahren Sie alles über {title}. Umfassende Informationen und praktische Tipps."[:155]
+    meta = {"title": meta_title, "description": meta_desc}
+
+    if not schema:
+        schema = {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": title,
+            "datePublished": datetime.now(UTC).isoformat(),
+            "inLanguage": language,
+        }
+
+    return {
+        "title": title,
+        "article_html": article_html,
+        "meta": meta,
+        "faq": faq if isinstance(faq, list) else [],
+        "schema": schema if isinstance(schema, dict) else {},
+    }
 
 
 def generate_article(
@@ -141,27 +241,23 @@ Regeln:
         logger.info("Non-default temperature provided; omitted to satisfy GPT-5 requirements.")
 
     resp = client.chat.completions.create(**kwargs)
-
     raw = resp.choices[0].message.content or "{}"
+
+    # Try to parse and then normalize/coerce
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        snippet = (raw[:500] + "…") if len(raw) > 500 else raw
-        logger.error("JSON decoding failed. Snippet:\n%s", snippet)
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        snippet = (raw[:1000] + "…") if len(raw) > 1000 else raw
+        logger.error("JSON decoding failed. Raw snippet:\n%s", snippet)
         raise
 
-    validate_minimal_shape(data)
-    data.setdefault("title", topic)
-    data.setdefault(
-        "schema",
-        {
-            "@context": "https://schema.org",
-            "@type": "Article",
-            "headline": data["title"],
-            "datePublished": datetime.now(UTC).isoformat(),
-            "inLanguage": language,
-        },
-    )
+    try:
+        data = normalize_and_coerce(parsed, topic_fallback=topic, language=language)
+    except Exception as e:
+        # Log the parsed object for debugging
+        snippet = json.dumps(parsed, ensure_ascii=False)[:1200]
+        logger.error("Structured JSON shape error: %s\nParsed snippet: %s", e, snippet)
+        raise
 
     # Optional image
     if include_images:
