@@ -16,10 +16,13 @@ from aiwriter_backend.core.config import settings
 
 # ---------- Config ----------
 DEFAULT_TOPIC = "best tools for camping in the snow"
-DEFAULT_LANGUAGE = "de"       # change to "en" if you want English
+DEFAULT_LANGUAGE = "de"
 DEFAULT_LENGTH = "medium"     # short | medium | long
-DEFAULT_TEMPERATURE = 1.0     # GPT-5 only allows default=1; any other value is omitted
-MODEL = "gpt-5"               # uses max_completion_tokens (not max_tokens)
+DEFAULT_TEMPERATURE = 1.0     # GPT-5: only default(=1) is accepted; others omitted
+MODEL = "gpt-5"               # uses max_completion_tokens
+
+MAX_TOKENS_PRIMARY = 2200
+MAX_TOKENS_FALLBACK = 1800
 
 # ---------- Logging ----------
 LOG_DIR = Path("logs")
@@ -62,37 +65,30 @@ def _extract_first_heading(html: str) -> Optional[str]:
         m = re.search(r"<h2[^>]*>(.*?)</h2>", html, flags=re.I | re.S)
     if not m:
         return None
-    # strip tags inside heading
     text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
     return text or None
 
 
-def _get_first(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[Any]:
-    for k in keys:
-        if k in d and d[k] not in (None, ""):
-            return d[k]
-    return None
+def _strip_tags(s: str) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").strip()
 
 
 def normalize_and_coerce(raw: Dict[str, Any], topic_fallback: str, language: str) -> Dict[str, Any]:
     """
     Make the model's JSON usable even if keys differ.
-    - Handles common synonyms / languages (title/titel/headline, content/html/article_html, etc.)
-    - Ensures faq is a list and schema is an object
-    - Builds fallbacks for missing title and schema
     """
     if not isinstance(raw, dict):
         raise ValueError("Model did not return a JSON object.")
 
-    # Flatten one level if the model wrapped everything: {"article": {...}}
+    # Unwrap one level
     candidate = raw
     for wrap_key in ("article", "result", "data", "payload", "content"):
         if isinstance(raw.get(wrap_key), dict):
             candidate = raw[wrap_key]
             break
 
-    # Create a case-insensitive view of keys
     lower_map = {k.lower(): k for k in candidate.keys()}
+
     def get_ci(*names: str) -> Optional[Any]:
         for name in names:
             k = lower_map.get(name.lower())
@@ -100,54 +96,43 @@ def normalize_and_coerce(raw: Dict[str, Any], topic_fallback: str, language: str
                 return candidate[k]
         return None
 
-    # Title candidates
     title = get_ci("title", "titel", "headline", "article_title", "artikel_titel")
-    # Article HTML candidates
     article_html = get_ci("article_html", "html", "content_html", "content", "article")
 
-    # Meta can be object or split fields
     meta = get_ci("meta", "metadata")
     if not isinstance(meta, dict):
         meta = {}
-        mt = get_ci("meta_title", "metatitle", "seo_title")
+        mt = get_ci("meta_title", "metatitle", "seo_title", "headline")
         md = get_ci("meta_description", "metadescription", "seo_description", "description")
-        if mt or md:
-            if mt:
-                meta["title"] = mt
-            if md:
-                meta["description"] = md
+        if mt:
+            meta["title"] = mt
+        if md:
+            meta["description"] = md
 
-    # FAQ candidates
     faq = get_ci("faq", "faqs", "faq_list")
     if faq is None:
         faq = []
     if isinstance(faq, dict):
-        # Sometimes {"items":[...]} or {"list":[...]}
-        faq = _get_first(faq, ("items", "list", "entries")) or []
+        faq = faq.get("items") or faq.get("list") or faq.get("entries") or []
     if not isinstance(faq, list):
         faq = []
 
-    # Schema candidates
     schema = get_ci("schema", "jsonld", "json_ld", "structured_data", "schema_org")
     if not isinstance(schema, dict):
         schema = {}
 
     # Fallbacks
     if not title:
-        # try meta.title
         if isinstance(meta, dict) and isinstance(meta.get("title"), str) and meta["title"].strip():
             title = meta["title"].strip()
-        # try heading in html
         if not title and isinstance(article_html, str):
             title = _extract_first_heading(article_html)
-        # final fallback
         if not title:
             title = topic_fallback
 
     if not isinstance(article_html, str) or not article_html.strip():
         raise ValueError("Missing or invalid 'article_html'.")
 
-    # Ensure meta has both fields with limits
     meta_title = meta.get("title") if isinstance(meta, dict) else None
     meta_desc = meta.get("description") if isinstance(meta, dict) else None
     if not isinstance(meta_title, str) or not meta_title.strip():
@@ -174,6 +159,158 @@ def normalize_and_coerce(raw: Dict[str, Any], topic_fallback: str, language: str
     }
 
 
+def _primary_json_schema(language: str) -> Dict[str, Any]:
+    return {
+        "name": "ArticleBundle",
+        "schema": {
+            "type": "object",
+            "required": ["title", "article_html", "meta", "faq", "schema"],
+            "properties": {
+                "title": {"type": "string", "minLength": 3},
+                "article_html": {"type": "string", "minLength": 50},
+                "meta": {
+                    "type": "object",
+                    "required": ["title", "description"],
+                    "properties": {
+                        "title": {"type": "string", "maxLength": 60},
+                        "description": {"type": "string", "maxLength": 155},
+                    },
+                },
+                "faq": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "required": ["q", "a"],
+                        "properties": {
+                            "q": {"type": "string", "minLength": 3},
+                            "a": {"type": "string", "minLength": 40, "maxLength": 900},
+                        },
+                    },
+                },
+                "schema": {
+                    "type": "object",
+                    "required": ["@context", "@type", "headline", "datePublished", "inLanguage"],
+                    "properties": {
+                        "@context": {"const": "https://schema.org"},
+                        "@type": {"const": "Article"},
+                        "headline": {"type": "string"},
+                        "datePublished": {"type": "string"},
+                        "inLanguage": {"type": "string", "const": language},
+                    },
+                },
+            },
+            "additionalProperties": True,
+        },
+        "strict": True,
+    }
+
+
+def _minimal_json_schema(language: str) -> Dict[str, Any]:
+    return {
+        "name": "ArticleMinimal",
+        "schema": {
+            "type": "object",
+            "required": ["title", "article_html"],
+            "properties": {
+                "title": {"type": "string", "minLength": 3},
+                "article_html": {"type": "string", "minLength": 50},
+            },
+            "additionalProperties": True,
+        },
+        "strict": False,
+    }
+
+
+def _build_messages(topic: str, language: str, length: str) -> list:
+    sys_prompt = (
+        "Du bist ein deutscher SEO-Redakteur. "
+        "Antworte NUR als JSON entsprechend des Schemas (keine Erklärungen, kein Markdown). "
+        "Der Artikeltext (HTML) muss klare H2/H3-Struktur enthalten, kurze Absätze (≤120 Wörter), "
+        "Listen wo sinnvoll, keine übertriebene Sprache, keine Inline-CSS oder Skripte."
+    )
+
+    user_prompt = f"""
+Sprache: {language}
+Thema: {topic}
+Länge: {length_hint(length)}
+
+Richtlinien:
+- HTML sauber, semantisch, keine Inline-CSS, keine Skripte/iframes.
+- Meta-Title ≤ 60 Zeichen; Meta-Description ≤ 155 Zeichen.
+- 3–5 FAQ-Einträge mit prägnanten Antworten.
+"""
+
+    return [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _call_json_schema(
+    client: OpenAI,
+    schema_obj: Dict[str, Any],
+    messages: list,
+    max_tokens: int,
+    temperature: float,
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "model": MODEL,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": schema_obj,
+        },
+    }
+    if float(temperature) == 1.0:
+        kwargs["temperature"] = 1
+    else:
+        logger.info("Non-default temperature provided; omitted to satisfy GPT-5 requirements.")
+
+    resp = client.chat.completions.create(**kwargs)
+    content = resp.choices[0].message.content or "{}"
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        snippet = (content[:1500] + "…") if len(content) > 1500 else content
+        logger.error("JSON decode failed (schema mode). Raw snippet:\n%s", snippet)
+        return {}
+
+
+def _call_plain_text_fallback(
+    client: OpenAI,
+    topic: str,
+    language: str,
+    length: str,
+    temperature: float,
+) -> str:
+    """
+    As a last resort, ask for pure HTML (no JSON), then we will wrap it.
+    """
+    sys_prompt = (
+        "Du bist ein deutscher SEO-Redakteur. "
+        "Gib NUR reines HTML des Artikels aus (kein JSON, kein Markdown, keine Erklärungen). "
+        "Klare H2/H3-Struktur, kurze Absätze (≤120 Wörter), Listen wo sinnvoll, keine Inline-CSS."
+    )
+    user_prompt = f"Sprache: {language}\nThema: {topic}\nLänge: {length_hint(length)}\nNur HTML zurückgeben."
+
+    kwargs: Dict[str, Any] = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_completion_tokens": MAX_TOKENS_FALLBACK,
+    }
+    if float(temperature) == 1.0:
+        kwargs["temperature"] = 1
+
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content or ""
+
+
 def generate_article(
     client: OpenAI,
     topic: str,
@@ -184,80 +321,62 @@ def generate_article(
 ) -> Dict[str, Any]:
     logger.info("Starting article generation...")
 
-    sys_prompt = (
-        "Du bist ein deutscher SEO-Redakteur. "
-        "Antworte NUR als gültiges JSON-Objekt (keine Erklärungen, kein Markdown). "
-        "Der Artikeltext (HTML) muss klare H2/H3-Struktur enthalten, kurze Absätze (≤120 Wörter), "
-        "Listen wo sinnvoll, keine übertriebene Sprache, keine Inline-CSS oder Skripte."
-    )
+    messages = _build_messages(topic, language, length)
 
-    user_prompt = f"""
-Sprache: {language}
-Thema: {topic}
-Länge: {length_hint(length)}
+    # 1) Primary strict JSON schema
+    primary_schema = _primary_json_schema(language)
+    logger.info("Calling GPT-5 (JSON Schema: primary)…")
+    data1 = _call_json_schema(client, primary_schema, messages, MAX_TOKENS_PRIMARY, temperature)
 
-Gib EIN JSON-Objekt mit dieser Struktur zurück:
-{{
-  "title": "string (Artikel-Titel)",
-  "article_html": "string (vollständiger HTML-Artikel mit <h2>/<h3>, <p>, <ul>/<ol> wo sinnvoll)",
-  "meta": {{
-    "title": "string (≤60 Zeichen)",
-    "description": "string (≤155 Zeichen)"
-  }},
-  "faq": [
-    {{"q": "string", "a": "string (80–100 Wörter)"}}
-  ],
-  "schema": {{
-    "@context": "https://schema.org",
-    "@type": "Article",
-    "headline": "string",
-    "datePublished": "{datetime.now(UTC).isoformat()}",
-    "inLanguage": "{language}"
-  }}
-}}
-
-Regeln:
-- Gib ausschließlich JSON zurück.
-- `article_html` muss fertiges, sauberes HTML sein (ohne Inline-CSS/Script/iframe).
-- `meta.title` ≤ 60 Zeichen, `meta.description` ≤ 155 Zeichen.
-- 3–5 FAQ-Einträge.
-"""
-
-    logger.info("Calling GPT-5 (JSON mode)...")
-
-    # Build request kwargs, only include temperature if exactly 1 (GPT-5 requirement)
-    kwargs: Dict[str, Any] = {
-        "model": MODEL,
-        "max_completion_tokens": 1800,               # correct for GPT-5
-        "response_format": {"type": "json_object"},  # JSON mode
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    if float(temperature) == 1.0:
-        kwargs["temperature"] = 1  # allowed default
+    if data1:
+        try:
+            normalized = normalize_and_coerce(data1, topic_fallback=topic, language=language)
+            data = normalized
+        except Exception as e:
+            snippet = json.dumps(data1, ensure_ascii=False)[:1200]
+            logger.error("Structured JSON shape error (primary): %s\nParsed snippet: %s", e, snippet)
+            data = {}
     else:
-        logger.info("Non-default temperature provided; omitted to satisfy GPT-5 requirements.")
+        data = {}
 
-    resp = client.chat.completions.create(**kwargs)
-    raw = resp.choices[0].message.content or "{}"
+    # 2) Minimal schema fallback
+    if not data:
+        minimal_schema = _minimal_json_schema(language)
+        logger.info("Retrying with minimal JSON schema…")
+        data2 = _call_json_schema(client, minimal_schema, messages, MAX_TOKENS_FALLBACK, temperature)
+        if data2:
+            try:
+                normalized = normalize_and_coerce(data2, topic_fallback=topic, language=language)
+                data = normalized
+            except Exception as e:
+                snippet = json.dumps(data2, ensure_ascii=False)[:1200]
+                logger.error("Structured JSON shape error (minimal): %s\nParsed snippet: %s", e, snippet)
 
-    # Try to parse and then normalize/coerce
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        snippet = (raw[:1000] + "…") if len(raw) > 1000 else raw
-        logger.error("JSON decoding failed. Raw snippet:\n%s", snippet)
-        raise
-
-    try:
-        data = normalize_and_coerce(parsed, topic_fallback=topic, language=language)
-    except Exception as e:
-        # Log the parsed object for debugging
-        snippet = json.dumps(parsed, ensure_ascii=False)[:1200]
-        logger.error("Structured JSON shape error: %s\nParsed snippet: %s", e, snippet)
-        raise
+    # 3) Plain text (HTML) last resort
+    if not data:
+        logger.info("Final fallback: plain HTML request (no schema).")
+        html = _call_plain_text_fallback(client, topic, language, length, temperature)
+        if html and "<h" in html.lower():
+            title_guess = _extract_first_heading(html) or topic
+            meta_title = title_guess[:60]
+            meta_desc = f"Erfahren Sie alles über {title_guess}. Umfassende Informationen und praktische Tipps."[:155]
+            data = {
+                "title": title_guess,
+                "article_html": html,
+                "meta": {"title": meta_title, "description": meta_desc},
+                "faq": [],
+                "schema": {
+                    "@context": "https://schema.org",
+                    "@type": "Article",
+                    "headline": title_guess,
+                    "datePublished": datetime.now(UTC).isoformat(),
+                    "inLanguage": language,
+                },
+            }
+        else:
+            snippet = (html[:1500] + "…") if len(html) > 1500 else html
+            logger.error("Plain-text fallback returned empty/invalid HTML. Snippet:\n%s", snippet)
+            raise ValueError("Model returned empty JSON and fallback HTML was invalid.")
 
     # Optional image
     if include_images:
@@ -300,7 +419,7 @@ def save_outputs(base_dir: Path, data: Dict[str, Any]) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Simple one-shot article generator (JSON mode).")
+    parser = argparse.ArgumentParser(description="Simple one-shot article generator (JSON mode with schema + fallbacks).")
     parser.add_argument("--topic", default=DEFAULT_TOPIC, help="Topic for the article.")
     parser.add_argument("--language", default=DEFAULT_LANGUAGE, help="Article language (e.g., de, en).")
     parser.add_argument("--length", default=DEFAULT_LENGTH, choices=["short", "medium", "long"], help="Article length.")
@@ -308,7 +427,7 @@ def main():
         "--temperature",
         type=float,
         default=DEFAULT_TEMPERATURE,
-        help="Model temperature (GPT-5 only allows default=1; non-1 will be omitted).",
+        help="GPT-5 only allows default=1; non-1 will be omitted.",
     )
     parser.add_argument("--images", type=int, default=0, help="Generate 1 image if >0.")
     args = parser.parse_args()
