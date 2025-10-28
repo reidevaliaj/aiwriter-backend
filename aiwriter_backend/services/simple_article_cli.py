@@ -18,13 +18,11 @@ from aiwriter_backend.core.config import settings
 DEFAULT_TOPIC = "best tools for camping in the snow"
 DEFAULT_LANGUAGE = "de"
 DEFAULT_LENGTH = "medium"          # short | medium | long
-DEFAULT_TEMPERATURE = 1.0          # For GPT-5, only 1.0 is accepted; others omitted
-DEFAULT_MODEL = "gpt-5"            # You can pass --model gpt-4o for stability
-DEFAULT_SCHEMA_MODE = "json_object"  # none | json_object | json_schema
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_MODEL = "gpt-4o"           # Stable production model
+DEFAULT_SCHEMA_MODE = "json_object"
 
-# token budgets
-MAX_TOKENS_PRIMARY = 2200
-MAX_TOKENS_FALLBACK = 1800
+MAX_TOKENS = 2200
 
 # ---------- Logging ----------
 LOG_DIR = Path("logs")
@@ -50,10 +48,6 @@ def ensure_key() -> str:
     return key
 
 
-def is_gpt5(model: str) -> bool:
-    return model.strip().lower().startswith("gpt-5")
-
-
 def length_hint(length: str) -> str:
     mapping = {
         "short":  "3–4 H2-Abschnitte, 600–800 Wörter",
@@ -76,10 +70,7 @@ def _extract_first_heading(html: str) -> Optional[str]:
 
 
 def normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) -> Dict[str, Any]:
-    """
-    Accept slightly off-structure JSON and coerce to:
-    { title, article_html, meta{title,description}, faq[], schema{} }
-    """
+    """Coerce model output into a consistent JSON shape."""
     if not isinstance(raw, dict):
         raise ValueError("Model did not return a JSON object.")
 
@@ -89,7 +80,6 @@ def normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) ->
             candidate = candidate[wrap]
             break
 
-    # case-insensitive getter
     lower_map = {k.lower(): k for k in candidate.keys()}
 
     def get_ci(*names: str) -> Optional[Any]:
@@ -99,53 +89,27 @@ def normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) ->
                 return candidate[k]
         return None
 
-    title = get_ci("title", "titel", "headline", "article_title")
-    article_html = get_ci("article_html", "html", "content_html", "content", "article")
+    title = get_ci("title", "titel", "headline")
+    article_html = get_ci("article_html", "html", "content")
 
-    # meta
     meta = get_ci("meta", "metadata")
     if not isinstance(meta, dict):
         meta = {}
-        mt = get_ci("meta_title", "seo_title", "headline")
-        md = get_ci("meta_description", "seo_description", "description")
-        if mt:
-            meta["title"] = mt
-        if md:
-            meta["description"] = md
-
-    # faq
-    faq = get_ci("faq", "faqs", "faq_list")
-    if faq is None:
-        faq = []
-    if isinstance(faq, dict):
-        faq = faq.get("items") or faq.get("list") or faq.get("entries") or []
+    faq = get_ci("faq", "faqs")
     if not isinstance(faq, list):
         faq = []
-
-    # schema
-    schema = get_ci("schema", "jsonld", "json_ld", "structured_data", "schema_org")
+    schema = get_ci("schema", "jsonld")
     if not isinstance(schema, dict):
         schema = {}
 
-    # fallbacks
     if not title:
-        if isinstance(meta.get("title"), str) and meta["title"].strip():
-            title = meta["title"].strip()
-    if not title and isinstance(article_html, str):
-        title = _extract_first_heading(article_html)
-    if not title:
-        title = topic_fallback
-
+        title = _extract_first_heading(article_html) or topic_fallback
     if not isinstance(article_html, str) or not article_html.strip():
         raise ValueError("Missing or invalid 'article_html'.")
 
-    meta_title = meta.get("title")
-    meta_desc = meta.get("description")
-    if not isinstance(meta_title, str) or not meta_title.strip():
-        meta_title = title[:60]
-    if not isinstance(meta_desc, str) or not meta_desc.strip():
-        meta_desc = f"Erfahren Sie alles über {title}. Umfassende Informationen und praktische Tipps."[:155]
-    meta = {"title": meta_title, "description": meta_desc}
+    meta_title = meta.get("title") or title[:60]
+    meta_desc = meta.get("description") or f"Erfahren Sie alles über {title}."
+    meta = {"title": meta_title, "description": meta_desc[:155]}
 
     if not schema:
         schema = {
@@ -165,14 +129,14 @@ def normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) ->
     }
 
 
-def build_messages(topic: str, language: str, length: str, json_only_hint: bool) -> list:
+def build_messages(topic: str, language: str, length: str) -> list:
+    """System and user messages for article generation."""
     sys = (
         "Du bist ein deutscher SEO-Redakteur. "
         "Der Artikeltext (HTML) muss klare H2/H3-Struktur enthalten, kurze Absätze (≤120 Wörter), "
-        "Listen wo sinnvoll, keine übertriebene Sprache, keine Inline-CSS oder Skripte."
+        "Listen wo sinnvoll, keine übertriebene Sprache, keine Inline-CSS oder Skripte. "
+        "Antworte ausschließlich als gültiges JSON-Objekt ohne zusätzliche Erklärungen."
     )
-    if json_only_hint:
-        sys += " Antworte ausschließlich als gültiges JSON-Objekt ohne zusätzliche Erklärungen."
 
     user = f"""
 Sprache: {language}
@@ -201,94 +165,26 @@ Gib diese Struktur zurück:
 Regeln:
 - Meta-Title ≤ 60 Zeichen; Meta-Description ≤ 155 Zeichen.
 - 3–5 FAQ-Einträge.
-- Kein Markdown, keine Codeblöcke, nur JSON-Inhalt (bei JSON-Modus).
-""".strip()
-
+- Kein Markdown, keine Codeblöcke, nur JSON-Inhalt.
+"""
     return [
         {"role": "system", "content": sys},
         {"role": "user", "content": user},
     ]
 
 
-# ---------- Response format builders ----------
-def schema_article_bundle(language: str) -> Dict[str, Any]:
-    """Strict JSON Schema for GPT schema mode — with additionalProperties=false everywhere."""
-    return {
-        "name": "ArticleBundle",
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["title", "article_html", "meta", "faq", "schema"],
-            "properties": {
-                "title": {"type": "string", "minLength": 3},
-                "article_html": {"type": "string", "minLength": 50},
-                "meta": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["title", "description"],
-                    "properties": {
-                        "title": {"type": "string", "maxLength": 60},
-                        "description": {"type": "string", "maxLength": 155},
-                    },
-                },
-                "faq": {
-                    "type": "array",
-                    "minItems": 3,
-                    "maxItems": 5,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["q", "a"],
-                        "properties": {
-                            "q": {"type": "string", "minLength": 3},
-                            "a": {"type": "string", "minLength": 40, "maxLength": 900},
-                        },
-                    },
-                },
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["@context", "@type", "headline", "datePublished", "inLanguage"],
-                    "properties": {
-                        "@context": {"const": "https://schema.org"},
-                        "@type": {"const": "Article"},
-                        "headline": {"type": "string"},
-                        "datePublished": {"type": "string"},
-                        "inLanguage": {"type": "string", "const": language},
-                    },
-                },
-            },
-        },
-        "strict": True,
-    }
-
-
-# ---------- OpenAI call helpers ----------
-def _chat_create(client: OpenAI, *, model: str, messages: list, max_tokens: int, temperature: float,
-                 response_format: Optional[Dict[str, Any]] = None) -> str:
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-    }
-
-    # GPT-5 uses max_completion_tokens; others ignore safely
-    if is_gpt5(model):
-        kwargs["max_completion_tokens"] = max_tokens
-        if float(temperature) == 1.0:
-            kwargs["temperature"] = 1
-        # else omit temperature for GPT-5
-    else:
-        kwargs["temperature"] = float(temperature)
-        kwargs["max_tokens"] = max_tokens  # legacy field for non-GPT-5 models
-
-    if response_format is not None:
-        kwargs["response_format"] = response_format
-
-    resp = client.chat.completions.create(**kwargs)
+# ---------- OpenAI Call ----------
+def _chat_create(client: OpenAI, *, model: str, messages: list, max_tokens: int, temperature: float) -> str:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
     return resp.choices[0].message.content or ""
 
 
-# ---------- Generation ----------
 def generate_article(
     client: OpenAI,
     *,
@@ -297,108 +193,28 @@ def generate_article(
     length: str,
     temperature: float,
     include_images: bool,
-    model: str,
-    schema_mode: str,  # none | json_object | json_schema
 ) -> Dict[str, Any]:
-    logger.info(f"Calling {model} with schema mode: {schema_mode}")
+    """Main article generation entry point."""
+    logger.info(f"Calling gpt-4o (JSON mode)...")
 
-    if schema_mode == "json_schema":
-        # Strict schema mode
-        messages = build_messages(topic, language, length, json_only_hint=True)
-        rf = {"type": "json_schema", "json_schema": schema_article_bundle(language)}
-        content = _chat_create(
-            client,
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS_PRIMARY,
-            temperature=temperature,
-            response_format=rf,
-        )
-        try:
-            raw = json.loads(content)
-        except json.JSONDecodeError:
-            snippet = (content[:1500] + "…") if len(content) > 1500 else content
-            logger.error("JSON decode failed (schema mode). Raw snippet:\n%s", snippet)
-            raw = {}
-        if not raw:
-            raise ValueError("Empty JSON in schema mode.")
-        data = normalize_result(raw, topic, language)
+    messages = build_messages(topic, language, length)
+    content = _chat_create(
+        client,
+        model="gpt-4o",
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=temperature,
+    )
 
-    elif schema_mode == "json_object":
-        # JSON mode (forgiving)
-        messages = build_messages(topic, language, length, json_only_hint=True)
-        rf = {"type": "json_object"}
-        content = _chat_create(
-            client,
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS_PRIMARY,
-            temperature=temperature,
-            response_format=rf,
-        )
-        try:
-            raw = json.loads(content)
-        except json.JSONDecodeError:
-            snippet = (content[:1500] + "…") if len(content) > 1500 else content
-            logger.error("JSON decode failed (json_object). Raw snippet:\n%s", snippet)
-            raw = {}
-        if not raw:
-            raise ValueError("Empty JSON in json_object mode.")
-        data = normalize_result(raw, topic, language)
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError:
+        logger.error("JSON decode failed. Raw snippet:\n%s", content[:1000])
+        raise
 
-    else:
-        # schema_mode == "none": prompt to return JSON, but accept slight deviations
-        messages = build_messages(topic, language, length, json_only_hint=True)
-        content = _chat_create(
-            client,
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS_PRIMARY,
-            temperature=temperature,
-            response_format=None,
-        )
-        # Attempt JSON parse; if fails, try HTML fallback
-        try:
-            raw = json.loads(content)
-            data = normalize_result(raw, topic, language)
-        except Exception as e:
-            logger.warning("Non-schema JSON parse failed (%s). Trying pure HTML fallback…", e)
-            # Ask for JUST HTML as last resort
-            sys2 = ("Du bist ein deutscher SEO-Redakteur. "
-                    "Gib NUR reines HTML des Artikels aus (kein JSON, kein Markdown, keine Erklärungen). "
-                    "Klare H2/H3-Struktur, kurze Absätze (≤120 Wörter), Listen wo sinnvoll, keine Inline-CSS.")
-            user2 = f"Sprache: {language}\nThema: {topic}\nLänge: {length_hint(length)}\nNur HTML zurückgeben."
-            content2 = _chat_create(
-                client,
-                model=model,
-                messages=[{"role": "system", "content": sys2}, {"role": "user", "content": user2}],
-                max_tokens=MAX_TOKENS_FALLBACK,
-                temperature=temperature,
-                response_format=None,
-            )
-            html = content2 or ""
-            if "<h" not in html.lower():
-                snippet = (html[:1500] + "…") if len(html) > 1500 else html
-                raise ValueError(f"Plain HTML fallback invalid/empty. Snippet:\n{snippet}")
-            title_guess = _extract_first_heading(html) or topic
-            data = {
-                "title": title_guess,
-                "article_html": html,
-                "meta": {
-                    "title": title_guess[:60],
-                    "description": f"Erfahren Sie alles über {title_guess}. Umfassende Informationen und praktische Tipps."[:155],
-                },
-                "faq": [],
-                "schema": {
-                    "@context": "https://schema.org",
-                    "@type": "Article",
-                    "headline": title_guess,
-                    "datePublished": datetime.now(UTC).isoformat(),
-                    "inLanguage": language,
-                },
-            }
+    data = normalize_result(raw, topic, language)
 
-    # Optional image (URL only)
+    # Optional image
     if include_images:
         try:
             r = client.images.generate(
@@ -427,16 +243,12 @@ def save_outputs(base_dir: Path, data: Dict[str, Any]) -> None:
 
 
 def main():
-    p = argparse.ArgumentParser(description="One-shot article generator with selectable response modes.")
+    p = argparse.ArgumentParser(description="One-shot article generator using GPT-4o JSON mode.")
     p.add_argument("--topic", default=DEFAULT_TOPIC, help="Topic for the article.")
     p.add_argument("--language", default=DEFAULT_LANGUAGE, help="Article language (e.g., de, en).")
     p.add_argument("--length", default=DEFAULT_LENGTH, choices=["short", "medium", "long"], help="Article length.")
-    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
-                   help="For GPT-5 only 1.0 is accepted; others are omitted.")
+    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Model temperature (0–2).")
     p.add_argument("--images", type=int, default=0, help="Generate 1 image if >0.")
-    p.add_argument("--model", default=DEFAULT_MODEL, help="Model name, e.g., gpt-5 or gpt-4o.")
-    p.add_argument("--schema", default=DEFAULT_SCHEMA_MODE, choices=["none", "json_object", "json_schema"],
-                   help="Response format mode.")
     args = p.parse_args()
 
     try:
@@ -448,7 +260,7 @@ def main():
 
         logger.info(f"Topic: {args.topic}")
         logger.info(f"Language: {args.language} | Length: {args.length} | Temp: {args.temperature} | Images: {args.images}")
-        logger.info(f"Model: {args.model} | Schema: {args.schema}")
+        logger.info("Model: gpt-4o | Schema: json_object")
 
         data = generate_article(
             client=client,
@@ -457,8 +269,6 @@ def main():
             length=args.length,
             temperature=args.temperature,
             include_images=bool(args.images),
-            model=args.model,
-            schema_mode=args.schema,
         )
 
         save_outputs(out_dir, data)
