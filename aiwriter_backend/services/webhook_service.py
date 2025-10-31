@@ -19,6 +19,18 @@ class WebhookService:
     def __init__(self, db: Session):
         self.db = db
     
+    @staticmethod
+    def _coerce_json(value, default):
+        """Return JSON-like value as native Python, handling str/list/dict."""
+        if value is None:
+            return default
+        if isinstance(value, (list, dict)):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:  # noqa: BLE001
+            return default
+    
     async def send_article_to_wordpress(self, article_id: int) -> bool:
         """Send article to WordPress via webhook."""
         try:
@@ -44,16 +56,15 @@ class WebhookService:
                 "content": article.article_html,
                 "meta_title": article.meta_title,
                 "meta_description": article.meta_description,
-                "faq": json.loads(article.faq_json) if article.faq_json else [],
-                "schema_data": json.loads(article.schema_json) if article.schema_json else {},
+                "faq": self._coerce_json(article.faq_json, default=[]),
+                "schema_data": self._coerce_json(article.schema_json, default={}),
                 "featured_image": None
             }
             
             # Add featured image if available
-            if article.image_urls_json:
-                image_urls = json.loads(article.image_urls_json)
-                if image_urls:
-                    article_data["featured_image"] = image_urls[0]
+            image_urls = self._coerce_json(article.image_urls_json, default=[])
+            if image_urls:
+                article_data["featured_image"] = image_urls[0]
             
             # Create HMAC signature
             payload_str = json.dumps(article_data, sort_keys=True)
@@ -80,7 +91,7 @@ class WebhookService:
                 logger.info(f"Article {article_id} sent to WordPress successfully")
                 
                 # Update article status
-                article.status = ArticleStatus.PUBLISHED
+                article.status = ArticleStatus.READY
                 article.updated_at = datetime.utcnow()
                 self.db.commit()
                 

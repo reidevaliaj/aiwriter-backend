@@ -1,528 +1,349 @@
 """
-Article generation service with OpenAI integration.
+Article generation service leveraging the gpt-4o JSON workflow from
+`simple_article_cli.py`.
 """
-import json
+from __future__ import annotations
+
 import logging
 import re
-from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
 from sqlalchemy.orm import Session
 
-from aiwriter_backend.db.base import Job, Article, ArticleStatus, Site, License
-from aiwriter_backend.core.openai_client import run_text, run_text_structured, gen_image, retry_with_json_prompt
+from aiwriter_backend.core.config import settings
+from aiwriter_backend.core.openai_client import run_text_structured, gen_image
+from aiwriter_backend.db.base import Article, ArticleStatus, Job, License, Site
 from aiwriter_backend.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
-# JSON schemas for structured outputs
-OUTLINE_SCHEMA = {
-    "type": "object",
-    "required": ["title", "sections"],
-    "properties": {
-        "title": {"type": "string", "minLength": 3},
-        "sections": {
-            "type": "array",
-            "minItems": 3,
-            "items": {
-                "type": "object",
-                "required": ["h2"],
-                "properties": {
-                    "h2": {"type": "string", "minLength": 3},
-                    "h3s": {"type": "array", "items": {"type": "string"}}
-                }
-            }
-        }
-    }
-}
 
-FAQ_SCHEMA = {
-    "type": "array",
-    "minItems": 3,
-    "maxItems": 5,
-    "items": {
-        "type": "object",
-        "required": ["q", "a"],
-        "properties": {
-            "q": {"type": "string", "minLength": 3},
-            "a": {"type": "string", "minLength": 10, "maxLength": 900}
-        }
-    }
-}
+ARTICLE_SYSTEM_PROMPT_DE = (
+    "Du bist ein deutscher SEO-Redakteur. Der Artikel muss als sauberes HTML "
+    "mit H2/H3-Struktur, kurzen Absätzen (≤120 Wörter) und sinnvollen Listen "
+    "verfasst sein. Nutze einen professionellen Ton, verzichte auf "
+    "übertriebene Sprache sowie Inline-CSS oder Skripte. Antworte "
+    "ausschließlich als gültiges JSON-Objekt ohne zusätzliche Erklärungen."
+)
 
-META_SCHEMA = {
-    "type": "object",
-    "required": ["title", "description"],
-    "properties": {
-        "title": {"type": "string", "maxLength": 60},
-        "description": {"type": "string", "maxLength": 155}
-    }
-}
 
-SCHEMA_SCHEMA = {
+ARTICLE_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "required": ["@context", "@type", "headline", "datePublished", "inLanguage"],
+    "required": ["article_html"],
     "properties": {
-        "@context": {"const": "https://schema.org"},
-        "@type": {"const": "Article"},
-        "headline": {"type": "string", "minLength": 3},
-        "datePublished": {"type": "string"},
-        "inLanguage": {"type": "string"},
-        "mainEntityOfPage": {
+        "title": {"type": "string"},
+        "article_html": {"type": "string"},
+        "meta": {
             "type": "object",
             "properties": {
-                "@type": {"const": "WebPage"},
-                "@id": {"type": "string"}
-            }
-        }
-    }
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+            },
+        },
+        "faq": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["q", "a"],
+                "properties": {
+                    "q": {"type": "string"},
+                    "a": {"type": "string"},
+                },
+            },
+        },
+        "schema": {"type": "object"},
+    },
 }
 
-# System prompts separated by output type
-HTML_SYSTEM_PROMPT_DE = (
-    "Du bist ein deutscher SEO-Redakteur. Schreibe faktenbasierte, klare Artikel in professionellem Ton. "
-    "Verwende H2/H3-Überschriften, kurze Absätze (max. 120 Wörter) und Listen, wenn sinnvoll. "
-    "Vermeide Wiederholungen und übertriebene Sprache. Antworte ausschließlich in HTML, ohne Markdown."
-)
 
-JSON_SYSTEM_PROMPT_DE = (
-    "Du bist ein deutscher SEO-Redakteur. Erstelle strukturierte Daten für Artikel. "
-    "Antworte ausschließlich in gültigem JSON-Format, ohne zusätzlichen Text oder Erklärungen. "
-    "Verwende deutsche Sprache für alle Inhalte."
-)
+def _length_hint(length: str) -> str:
+    mapping = {
+        "short": "3–4 H2-Abschnitte, 600–800 Wörter",
+        "medium": "5–6 H2-Abschnitte, 900–1.300 Wörter",
+        "long": "7–8 H2-Abschnitte, 1.400–1.800 Wörter",
+    }
+    return mapping.get(length, mapping["medium"])
 
-# Legacy prompt (to be removed)
-SYSTEM_PROMPT_DE = HTML_SYSTEM_PROMPT_DE
+
+def _extract_first_heading(html: str) -> Optional[str]:
+    if not isinstance(html, str):
+        return None
+
+    match = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.I | re.S)
+    if not match:
+        match = re.search(r"<h2[^>]*>(.*?)</h2>", html, flags=re.I | re.S)
+    if not match:
+        return None
+
+    text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+    return text or None
+
+
+def _extract_outline(html: str) -> Dict[str, Any]:
+    sections: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+
+    for match in re.finditer(r"<(h[23])[^>]*>(.*?)</\1>", html, flags=re.I | re.S):
+        level = match.group(1).lower()
+        text = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+        if not text:
+            continue
+
+        if level == "h2":
+            current = {"h2": text, "h3s": []}
+            sections.append(current)
+        elif level == "h3" and current is not None:
+            current.setdefault("h3s", []).append(text)
+
+    return {"sections": sections}
+
+
+def _normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("Model did not return a JSON object.")
+
+    candidate = raw
+    for wrap in ("article", "result", "data", "payload", "content"):
+        if isinstance(candidate.get(wrap), dict):
+            candidate = candidate[wrap]
+            break
+
+    lower_map = {k.lower(): k for k in candidate.keys()}
+
+    def get_ci(*names: str) -> Optional[Any]:
+        for name in names:
+            key = lower_map.get(name.lower())
+            if key is not None:
+                return candidate[key]
+        return None
+
+    title = get_ci("title", "titel", "headline")
+    article_html = get_ci("article_html", "html", "content")
+
+    if not isinstance(article_html, str) or not article_html.strip():
+        raise ValueError("Missing or invalid 'article_html'.")
+
+    if not title:
+        title = _extract_first_heading(article_html) or topic_fallback
+
+    meta_obj = get_ci("meta", "metadata")
+    if not isinstance(meta_obj, dict):
+        meta_obj = {}
+
+    meta_title = meta_obj.get("title") or title[:60]
+    meta_description = meta_obj.get("description") or f"Erfahren Sie alles über {title}."
+    meta = {"title": meta_title[:60], "description": meta_description[:155]}
+
+    faq = get_ci("faq", "faqs")
+    if not isinstance(faq, list):
+        faq = []
+
+    schema = get_ci("schema", "jsonld")
+    if not isinstance(schema, dict):
+        schema = {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": title,
+            "datePublished": datetime.now(timezone.utc).isoformat(),
+            "inLanguage": language,
+        }
+
+    outline = _extract_outline(article_html)
+
+    return {
+        "title": title,
+        "article_html": article_html,
+        "meta": meta,
+        "faq": faq,
+        "schema": schema,
+        "outline": outline,
+    }
+
+
+def _build_messages(topic: str, language: str, length: str) -> List[Dict[str, str]]:
+    guidance = _length_hint(length)
+    published = datetime.now(timezone.utc).isoformat()
+
+    user_prompt = f"""
+Sprache: {language}
+Thema: {topic}
+Länge: {guidance}
+
+Gib diese Struktur zurück:
+{{
+  "title": "string",
+  "article_html": "string (vollständiges HTML mit <h2>/<h3>, <p>, <ul>/<ol>)",
+  "meta": {{
+    "title": "string (≤60 Zeichen)",
+    "description": "string (≤155 Zeichen)"
+  }},
+  "faq": [
+    {{"q": "string", "a": "string (80–100 Wörter)"}}
+  ],
+  "schema": {{
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "string",
+    "datePublished": "{published}",
+    "inLanguage": "{language}"
+  }}
+}}
+Regeln:
+- Meta-Title ≤ 60 Zeichen, Meta-Description ≤ 155 Zeichen.
+- 3–5 FAQ-Einträge.
+- Kein Markdown, keine Codeblöcke, nur JSON-Inhalt.
+"""
+
+    return [
+        {"role": "system", "content": ARTICLE_SYSTEM_PROMPT_DE},
+        {"role": "user", "content": user_prompt},
+    ]
 
 
 class ArticleGenerator:
-    """Real OpenAI-powered article generator."""
-    
+    """OpenAI-powered generator aligned with `simple_article_cli.py`."""
+
     def __init__(self, db: Session):
         self.db = db
         self.webhook_service = WebhookService(db)
-    
+
     async def generate_article(self, job_id: int) -> bool:
-        """
-        Generate a complete article using OpenAI.
-        
-        Args:
-            job_id: Job ID to process
-            
-        Returns:
-            True if successful, False otherwise
-        """
         try:
-            print(f"[ARTICLE_GENERATOR] Starting article generation for job {job_id}")
-            
-            # Check OpenAI API key
-            from aiwriter_backend.core.config import settings
+            logger.info("[ARTICLE_GENERATOR] Starting article generation", extra={"job_id": job_id})
+
             if not settings.OPENAI_API_KEY:
-                print(f"[ARTICLE_GENERATOR] ERROR: OpenAI API key not set")
+                logger.error("OpenAI API key not configured")
                 return False
-            
-            print(f"[ARTICLE_GENERATOR] OpenAI API key is set, using model: {settings.OPENAI_TEXT_MODEL}")
-            
-            # Get job and related data
+
             job = self.db.query(Job).filter(Job.id == job_id).first()
             if not job:
-                logger.error(f"Job {job_id} not found")
+                logger.error("Job not found", extra={"job_id": job_id})
                 return False
-            
+
             site = self.db.query(Site).filter(Site.id == job.site_id).first()
             if not site:
-                logger.error(f"Site for job {job_id} not found")
+                logger.error("Site not found for job", extra={"job_id": job_id})
                 return False
-            
+
             license_obj = self.db.query(License).filter(License.id == site.license_id).first()
             if not license_obj:
-                logger.error(f"License for job {job_id} not found")
+                logger.error("License not found for job", extra={"job_id": job_id})
                 return False
-            
-            logger.info(f"Starting article generation for job {job_id}: {job.topic}")
-            
-            # Update job status
+
             job.status = "processing"
             self.db.commit()
-            
-            # Create article record
+
             article = Article(
-                job_id=job_id,
+                job_id=job.id,
                 license_id=license_obj.id,
                 topic=job.topic,
                 language=job.language or "de",
-                status=ArticleStatus.DRAFT
+                status=ArticleStatus.DRAFT,
             )
             self.db.add(article)
             self.db.commit()
             self.db.refresh(article)
-            
-            # Generate article components
-            context = {
-                "topic": job.topic,
-                "length": job.length,
-                "language": job.language or "de",
-                "article_id": article.id
-            }
-            
-            # Step 1: Create outline
-            logger.info(f"Creating outline for article {article.id}")
-            outline = await self.create_outline(**context)
-            article.outline_json = outline
-            
-            # Step 2: Write sections
-            logger.info(f"Writing sections for article {article.id}")
-            sections_html = await self.write_sections(outline, **context)
-            
-            # Step 3: Write intro and conclusion
-            logger.info(f"Writing intro/conclusion for article {article.id}")
-            intro_html = await self.write_intro_and_conclusion(outline, **context)
-            
-            # Step 4: Generate FAQ
-            logger.info(f"Generating FAQ for article {article.id}")
-            faq_data = await self.generate_faq(outline, **context)
-            article.faq_json = faq_data
-            
-            # Step 5: Generate meta
-            logger.info(f"Generating meta for article {article.id}")
-            meta_data = await self.generate_meta(outline, **context)
-            article.meta_title = meta_data["title"]
-            article.meta_description = meta_data["description"]
-            
-            # Step 6: Generate schema
-            logger.info(f"Generating schema for article {article.id}")
-            schema_data = await self.generate_schema(outline, faq_data, **context)
-            article.schema_json = schema_data
-            
-            # Step 7: Assemble HTML
-            logger.info(f"Assembling HTML for article {article.id}")
-            full_html = await self.assemble_html(intro_html, sections_html, **context)
-            article.article_html = full_html
-            
-            # Step 8: Generate images (if requested)
-            if job.requested_images and job.requested_images > 0:
-                logger.info(f"Generating {job.requested_images} images for article {article.id}")
+
+            payload = await self._generate_payload(
+                topic=job.topic,
+                language=job.language or "de",
+                length=job.length or "medium",
+            )
+
+            article.topic = payload["title"]
+            article.article_html = payload["article_html"]
+            article.meta_title = payload["meta"]["title"]
+            article.meta_description = payload["meta"]["description"]
+            article.faq_json = payload["faq"]
+            article.schema_json = payload["schema"]
+            article.outline_json = payload.get("outline")
+
+            include_images = bool(job.requested_images and job.requested_images > 0)
+            if include_images:
                 image_urls = await self.generate_images(job.topic, job.requested_images)
                 article.image_urls_json = image_urls
-                # Calculate image cost (assuming $0.04 per image for DALL-E 3)
                 article.image_cost_cents = len(image_urls) * 4
-            
-            # Update article status
+
             article.status = ArticleStatus.READY
-            article.updated_at = datetime.utcnow()
-            
-            # Update job status
+            article.updated_at = datetime.now(timezone.utc)
+
             job.status = "completed"
-            job.finished_at = datetime.utcnow()
-            
+            job.finished_at = datetime.now(timezone.utc)
+
             self.db.commit()
-            
-            logger.info(f"Article {article.id} generated successfully")
-            
-            # Send to WordPress
+
+            logger.info(
+                "[ARTICLE_GENERATOR] Article generated successfully",
+                extra={"job_id": job_id, "article_id": article.id},
+            )
+
             await self.webhook_service.send_article_to_wordpress(article.id)
-            
+
             return True
-            
-        except Exception as e:
-            logger.error(f"Article generation failed for job {job_id}: {str(e)}")
-            
-            # Update job status
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Article generation failed", extra={"job_id": job_id})
+            self.db.rollback()
+
             job = self.db.query(Job).filter(Job.id == job_id).first()
             if job:
                 job.status = "failed"
-                job.error = str(e)
-                job.finished_at = datetime.utcnow()
+                job.error = str(exc)
+                job.finished_at = datetime.now(timezone.utc)
                 self.db.commit()
-            
-            # Update article status if it exists
+
             article = self.db.query(Article).filter(Article.job_id == job_id).first()
             if article:
                 article.status = ArticleStatus.FAILED
-                article.updated_at = datetime.utcnow()
+                article.updated_at = datetime.now(timezone.utc)
                 self.db.commit()
-            
+
             return False
-    
-    async def create_outline(self, topic: str, length: str, language: str, **kwargs) -> Dict[str, Any]:
-        """Create article outline with H2/H3 structure."""
-        length_guidance = {
-            "short": "3-4 H2 sections",
-            "medium": "5-6 H2 sections", 
-            "long": "7-8 H2 sections"
-        }
-        
-        messages = [
-            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
-            {
-                "role": "user", 
-                "content": f"""Erstelle eine detaillierte Gliederung für einen Artikel zum Thema "{topic}".
 
-Länge: {length_guidance.get(length, "5-6 H2 sections")}
+    async def _generate_payload(self, *, topic: str, language: str, length: str) -> Dict[str, Any]:
+        messages = _build_messages(topic, language, length)
+        logger.info(
+            "Calling OpenAI for article payload",
+            extra={"model": settings.OPENAI_TEXT_MODEL, "topic": topic},
+        )
 
-Antworte mit einem JSON-Objekt:
-{{
-  "title": "Artikel-Titel",
-  "sections": [
-    {{
-      "h2": "Hauptüberschrift",
-      "h3s": ["Unterüberschrift 1", "Unterüberschrift 2"]
-    }}
-  ]
-}}
+        raw = await run_text_structured(
+            messages,
+            ARTICLE_SCHEMA,
+            model=settings.OPENAI_TEXT_MODEL,
+            temperature=settings.OPENAI_TEMPERATURE,
+            max_completion_tokens=settings.OPENAI_MAX_TOKENS_TEXT,
+        )
 
-Stelle sicher, dass die Gliederung SEO-optimiert und strukturiert ist."""
-            }
-        ]
-        
-        try:
-            result = await run_text_structured(messages, OUTLINE_SCHEMA)
-            logger.info(f"Outline generated successfully for topic: {topic}")
-            return result
-        except Exception as e:
-            logger.error(f"Outline generation failed: {str(e)}")
-            # Fallback: return minimal outline
-            return {
-                "title": topic,
-                "sections": [
-                    {"h2": "Einführung", "h3s": []},
-                    {"h2": "Hauptinhalt", "h3s": []},
-                    {"h2": "Fazit", "h3s": []}
-                ]
-            }
-    
-    async def write_sections(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
-        """Write article sections based on outline."""
-        sections_html = []
-        
-        for section in outline.get("sections", []):
-            h2 = section.get("h2", "")
-            h3s = section.get("h3s", [])
-            
-            # Generate content for this section
-            messages = [
-                {"role": "system", "content": HTML_SYSTEM_PROMPT_DE},
-                {
-                    "role": "user",
-                    "content": f"""Schreibe den Inhalt für den Abschnitt "{h2}" des Artikels zum Thema "{topic}".
+        payload = _normalize_result(raw, topic, language)
+        logger.info("Article payload normalized", extra={"topic": topic})
+        return payload
 
-Unterüberschriften: {', '.join(h3s) if h3s else 'Keine'}
-
-Antworte in reinem HTML mit:
-- <h2>{h2}</h2>
-- <h3>Unterüberschrift</h3> für jede Unterüberschrift
-- <p>Absätze</p> mit max. 120 Wörtern
-- <ul><li>Listen</li></ul> oder <ol><li>Nummerierte Listen</li></ol> wenn sinnvoll
-
-Verwende keine Inline-CSS oder andere Formatierung."""
-                }
-            ]
-            
-            content = await run_text(messages)
-            sections_html.append(content)
-        
-        return "\n\n".join(sections_html)
-    
-    async def write_intro_and_conclusion(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> str:
-        """Write introduction and conclusion paragraphs."""
-        messages = [
-            {"role": "system", "content": HTML_SYSTEM_PROMPT_DE},
-            {
-                "role": "user",
-                "content": f"""Schreibe eine Einleitung und einen Schluss für den Artikel zum Thema "{topic}".
-
-Antworte in reinem HTML:
-- <p>Einleitungsparagraph (max. 120 Wörter)</p>
-- <p>Schlussparagraph (max. 120 Wörter)</p>
-
-Die Einleitung soll das Thema einführen und den Leser fesseln.
-Der Schluss soll die wichtigsten Punkte zusammenfassen."""
-            }
-        ]
-        
-        content = await run_text(messages)
-        return content
-    
-    async def generate_faq(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> List[Dict[str, str]]:
-        """Generate FAQ questions and answers."""
-        messages = [
-            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
-            {
-                "role": "user",
-                "content": f"""Erstelle 3-5 häufig gestellte Fragen zum Thema "{topic}".
-
-Antworte mit einem JSON-Array:
-[
-  {{"q": "Frage", "a": "Antwort (max. 80-100 Wörter)"}},
-  {{"q": "Frage", "a": "Antwort (max. 80-100 Wörter)"}}
-]
-
-Die Fragen sollen relevant und die Antworten präzise sein."""
-            }
-        ]
-        
-        try:
-            result = await run_text_structured(messages, FAQ_SCHEMA)
-            logger.info(f"FAQ generated successfully for topic: {topic}")
-            return result
-        except Exception as e:
-            logger.error(f"FAQ generation failed: {str(e)}")
-            # Fallback: return minimal FAQ
-            return [
-                {"q": f"Was ist {topic}?", "a": f"Eine detaillierte Erklärung zu {topic}."},
-                {"q": f"Warum ist {topic} wichtig?", "a": f"Die Bedeutung von {topic} wird hier erklärt."},
-                {"q": f"Wie funktioniert {topic}?", "a": f"Die Funktionsweise von {topic} wird hier beschrieben."}
-            ]
-    
-    async def generate_meta(self, outline: Dict[str, Any], topic: str, length: str, language: str, **kwargs) -> Dict[str, str]:
-        """Generate meta title and description."""
-        messages = [
-            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
-            {
-                "role": "user",
-                "content": f"""Erstelle Meta-Titel und Meta-Beschreibung für den Artikel zum Thema "{topic}".
-
-Antworte mit einem JSON-Objekt:
-{{
-  "title": "Meta-Titel (max. 60 Zeichen)",
-  "description": "Meta-Beschreibung (max. 155 Zeichen)"
-}}
-
-Beide sollen SEO-optimiert und ansprechend sein."""
-            }
-        ]
-        
-        try:
-            result = await run_text_structured(messages, META_SCHEMA)
-            logger.info(f"Meta generated successfully for topic: {topic}")
-            return result
-        except Exception as e:
-            logger.error(f"Meta generation failed: {str(e)}")
-            # Fallback: return minimal meta
-            return {
-                "title": topic[:60],
-                "description": f"Erfahren Sie alles über {topic}. Umfassende Informationen und praktische Tipps."[:155]
-            }
-    
-    async def generate_schema(self, outline: Dict[str, Any], faq_data: List[Dict[str, str]], topic: str, length: str, language: str, **kwargs) -> Dict[str, Any]:
-        """Generate structured data schema."""
-        messages = [
-            {"role": "system", "content": JSON_SYSTEM_PROMPT_DE},
-            {
-                "role": "user",
-                "content": f"""Erstelle strukturierte Daten (Schema.org) für den Artikel zum Thema "{topic}".
-
-Antworte mit einem JSON-Objekt:
-{{
-  "@context": "https://schema.org",
-  "@type": "Article",
-  "headline": "Artikel-Titel",
-  "datePublished": "{datetime.now().isoformat()}",
-  "inLanguage": "{language}",
-  "mainEntityOfPage": {{
-    "@type": "WebPage",
-    "@id": "https://example.com/article"
-  }},
-  "author": {{
-    "@type": "Organization",
-    "name": "AIWriter"
-  }},
-  "publisher": {{
-    "@type": "Organization",
-    "name": "AIWriter"
-  }}
-}}
-
-Falls FAQ vorhanden sind, füge auch ein FAQPage-Schema hinzu."""
-            }
-        ]
-        
-        try:
-            result = await run_text_structured(messages, SCHEMA_SCHEMA)
-            logger.info(f"Schema generated successfully for topic: {topic}")
-            
-            # Add FAQ schema if we have FAQ data
-            if faq_data:
-                faq_schema = {
-                    "@context": "https://schema.org",
-                    "@type": "FAQPage",
-                    "mainEntity": [
-                        {
-                            "@type": "Question",
-                            "name": item["q"],
-                            "acceptedAnswer": {
-                                "@type": "Answer",
-                                "text": item["a"]
-                            }
-                        }
-                        for item in faq_data
-                    ]
-                }
-                result["faq"] = faq_schema
-            
-            return result
-        except Exception as e:
-            logger.error(f"Schema generation failed: {str(e)}")
-            # Fallback: return minimal schema
-            return {
-                "@context": "https://schema.org",
-                "@type": "Article",
-                "headline": topic,
-                "datePublished": datetime.now().isoformat(),
-                "inLanguage": language,
-                "mainEntityOfPage": {
-                    "@type": "WebPage",
-                    "@id": "https://example.com/article"
-                }
-            }
-    
-    async def assemble_html(self, intro_html: str, sections_html: str, topic: str, length: str, language: str, **kwargs) -> str:
-        """Assemble final HTML article."""
-        # Combine intro, sections, and conclusion
-        full_html = f"{intro_html}\n\n{sections_html}"
-        
-        # Clean up HTML
-        full_html = self._clean_html(full_html)
-        
-        return full_html
-    
     async def generate_images(self, topic: str, requested_images: int) -> List[str]:
-        """Generate images for the article."""
         if requested_images <= 0:
             return []
-        
-        image_urls = []
-        
-        for i in range(requested_images):
+
+        urls: List[str] = []
+        prompt = (
+            f"Sachliche, moderne Titelillustration zum Thema „{topic}“, flache "
+            "Illustration, kein Text, neutraler Hintergrund."
+        )
+
+        for index in range(requested_images):
             try:
-                prompt = f"Sachliche, moderne Titelillustration zum Thema „{topic}“, flache Illustration, kein Text, neutraler Hintergrund."
-                
-                image_url = await gen_image(
-                    prompt=prompt,
-                    size="1024x1024",
-                    quality="high"
+                url = await gen_image(prompt=prompt, size="1024x1024", quality="high")
+                if url:
+                    urls.append(url)
+                    logger.info(
+                        "Generated image",
+                        extra={"topic": topic, "index": index + 1, "total": requested_images},
+                    )
+            except Exception as image_error:  # noqa: BLE001
+                logger.warning(
+                    "Image generation failed",
+                    extra={"topic": topic, "error": str(image_error)},
                 )
-                
-                image_urls.append(image_url)
-                logger.info(f"Generated image {i+1}/{requested_images}: {image_url}")
-                
-            except Exception as e:
-                logger.error(f"Image generation failed for image {i+1}: {str(e)}")
-                # Continue with other images
-                continue
-        
-        return image_urls
-    
-    def _clean_html(self, html: str) -> str:
-        """Clean and sanitize HTML content."""
-        # Remove any inline CSS
-        html = re.sub(r'style="[^"]*"', '', html)
-        
-        # Ensure proper heading hierarchy
-        html = re.sub(r'<h([1-6])>', lambda m: f'<h{int(m.group(1)) + 1}>', html)
-        
-        # Remove any risky tags
-        risky_tags = ['script', 'iframe', 'object', 'embed']
-        for tag in risky_tags:
-            html = re.sub(f'<{tag}[^>]*>.*?</{tag}>', '', html, flags=re.IGNORECASE | re.DOTALL)
-        
-        return html.strip()
+
+        return urls
+
