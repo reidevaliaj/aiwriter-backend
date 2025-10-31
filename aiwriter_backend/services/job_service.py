@@ -54,22 +54,33 @@ class JobService:
             if include_images:
                 print(f"[JOB_SERVICE] Checking image quota for plan {license_obj.plan_id}")
                 plan = self.db.query(Plan).filter(Plan.id == license_obj.plan_id).first()
-                if plan and plan.max_images_per_article == 0:
+                if not plan:
+                    print(f"[JOB_SERVICE] ERROR: Plan not found for ID {license_obj.plan_id}")
+                    return JobResponse(
+                        success=False,
+                        message="Plan information missing"
+                    )
+
+                allowance = plan.max_images_per_article if plan.max_images_per_article is not None else 0
+                if allowance <= 0:
                     print(f"[JOB_SERVICE] ERROR: Image generation not available in plan {plan.name}")
                     return JobResponse(
                         success=False,
                         message="Image generation not available in your plan"
                     )
-                print(f"[JOB_SERVICE] Image generation allowed: {plan.max_images_per_article} images per article")
+
+                print(f"[JOB_SERVICE] Image generation allowed: {allowance} images per article")
             else:
                 print(f"[JOB_SERVICE] No image generation requested, skipping image quota check")
             
             # Determine number of images to request
             requested_images = 0
             if include_images:
-                plan = self.db.query(Plan).filter(Plan.id == license_obj.plan_id).first()
+                plan = plan or self.db.query(Plan).filter(Plan.id == license_obj.plan_id).first()
+                allowance = 0
                 if plan:
-                    requested_images = min(plan.max_images_per_article, 2)  # Cap at 2 for now
+                    allowance = plan.max_images_per_article if plan.max_images_per_article is not None else 0
+                requested_images = min(max(allowance, 0), 1)
             
             # Create job
             job = Job(

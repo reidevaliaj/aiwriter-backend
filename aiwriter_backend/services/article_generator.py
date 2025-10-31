@@ -4,15 +4,18 @@ Article generation service leveraging the gpt-4o JSON workflow from
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import requests
+
 from sqlalchemy.orm import Session
 
 from aiwriter_backend.core.config import settings
-from aiwriter_backend.core.openai_client import run_text_structured, gen_image
+from aiwriter_backend.core.openai_client import run_text, run_text_structured, gen_image
 from aiwriter_backend.db.base import Article, ArticleStatus, Job, License, Site
 from aiwriter_backend.services.webhook_service import WebhookService
 
@@ -201,6 +204,62 @@ Regeln:
     ]
 
 
+async def get_image_topic_from_openai(topic: str) -> str:
+    """Derive a short descriptive phrase for image search."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a content assistant. Given an article topic, respond with a short, "
+                "descriptive phrase that best represents a good photo for this topic. Respond with only the phrase."
+            ),
+        },
+        {"role": "user", "content": topic},
+    ]
+
+    try:
+        response = await run_text(
+            messages,
+            model="gpt-4o",
+            temperature=0.4,
+            max_completion_tokens=48,
+        )
+        return response.strip().strip('"').strip("'")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falling back to original topic for image", extra={"topic": topic, "error": str(exc)})
+        return topic
+
+
+def get_image_from_pexels(keyword: str) -> Optional[str]:
+    """Fetch a representative image URL from Pexels."""
+    api_key = "36l3lUAEJNu26bMbOrvXxplQPn8HffWIViMvjdTOcVqL7HNeMkfyrvvz"
+    url = "https://api.pexels.com/v1/search"
+    params = {"query": keyword, "per_page": 1}
+    headers = {"Authorization": api_key}
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code != 200:
+            logger.warning(
+                "Pexels request failed",
+                extra={"keyword": keyword, "status": response.status_code, "body": response.text[:200]},
+            )
+            return None
+
+        data = response.json()
+        photos = data.get("photos") or []
+        if not photos:
+            logger.info("Pexels returned no photos", extra={"keyword": keyword})
+            return None
+
+        src = photos[0].get("src", {})
+        return src.get("large") or src.get("medium") or src.get("original")
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Error fetching image from Pexels", extra={"keyword": keyword, "error": str(exc)})
+        return None
+
+
 class ArticleGenerator:
     """OpenAI-powered generator aligned with `simple_article_cli.py`."""
 
@@ -325,25 +384,31 @@ class ArticleGenerator:
             return []
 
         urls: List[str] = []
+
+        image_topic = await get_image_topic_from_openai(topic)
+        logger.info("Derived image topic", extra={"topic": topic, "image_topic": image_topic})
+
+        pexels_url = await asyncio.to_thread(get_image_from_pexels, image_topic)
+        if pexels_url:
+            logger.info("Fetched image from Pexels", extra={"topic": topic, "image_topic": image_topic})
+            urls.append(pexels_url)
+            return urls[:1]
+
         prompt = (
             f"Sachliche, moderne Titelillustration zum Thema „{topic}“, flache "
             "Illustration, kein Text, neutraler Hintergrund."
         )
 
-        for index in range(requested_images):
-            try:
-                url = await gen_image(prompt=prompt, size="1024x1024", quality="high")
-                if url:
-                    urls.append(url)
-                    logger.info(
-                        "Generated image",
-                        extra={"topic": topic, "index": index + 1, "total": requested_images},
-                    )
-            except Exception as image_error:  # noqa: BLE001
-                logger.warning(
-                    "Image generation failed",
-                    extra={"topic": topic, "error": str(image_error)},
-                )
+        try:
+            url = await gen_image(prompt=prompt, size="1024x1024", quality="high")
+            if url:
+                urls.append(url)
+                logger.info("Generated fallback image with OpenAI", extra={"topic": topic})
+        except Exception as image_error:  # noqa: BLE001
+            logger.warning(
+                "Image generation failed after Pexels fallback",
+                extra={"topic": topic, "error": str(image_error)},
+            )
 
-        return urls
+        return urls[:1]
 
