@@ -337,7 +337,7 @@ class ArticleGenerator:
                 extra={"job_id": job_id, "article_id": article.id},
             )
 
-            await self.webhook_service.send_article_to_wordpress(article.id)
+            await self.webhook_service.send_article_to_wordpress(article.id, payload_override=payload)
 
             return True
 

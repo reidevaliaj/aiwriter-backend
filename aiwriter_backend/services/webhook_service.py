@@ -6,6 +6,8 @@ import json
 import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
+from typing import Optional
+
 from aiwriter_backend.db.base import Site, Job, Article, ArticleStatus
 from aiwriter_backend.schemas.webhook import PublishResponse
 from aiwriter_backend.core.security import verify_hmac_signature
@@ -31,7 +33,7 @@ class WebhookService:
         except Exception:  # noqa: BLE001
             return default
     
-    async def send_article_to_wordpress(self, article_id: int) -> bool:
+    async def send_article_to_wordpress(self, article_id: int, payload_override: Optional[dict] = None) -> bool:
         """Send article to WordPress via webhook."""
         try:
             # Get article and related data
@@ -50,16 +52,8 @@ class WebhookService:
                 logger.error(f"Site for job {job.id} not found")
                 return False
             
-            # Prepare article data
-            article_data = {
-                "title": article.topic,
-                "content": article.article_html,
-                "meta_title": article.meta_title,
-                "meta_description": article.meta_description,
-                "faq": self._coerce_json(article.faq_json, default=[]),
-                "schema_data": self._coerce_json(article.schema_json, default={}),
-                "featured_image": None
-            }
+            # Prepare article data, preferring freshly generated payload if provided
+            article_data = self._build_article_payload(article, payload_override)
             
             # Add featured image if available
             image_urls = self._coerce_json(article.image_urls_json, default=[])
@@ -129,6 +123,59 @@ class WebhookService:
         ).hexdigest()
         
         return signature
+
+    def _build_article_payload(self, article: Article, payload_override: Optional[dict]) -> dict:
+        payload = payload_override or {}
+
+        # Title
+        title = payload.get("title") or article.topic or "Untitled Article"
+
+        # Content (fallback order)
+        content = (
+            payload.get("article_html")
+            or payload.get("content")
+            or payload.get("content_html")
+            or article.article_html
+            or ""
+        )
+
+        # Meta
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        meta_title = meta.get("title") or payload.get("meta_title") or article.meta_title or title[:60]
+        meta_description = (
+            meta.get("description")
+            or payload.get("meta_description")
+            or article.meta_description
+            or f"Erfahren Sie mehr über {title}."[:155]
+        )
+
+        # FAQ & schema
+        faq_payload = payload.get("faq") if isinstance(payload.get("faq"), list) else None
+        schema_payload = payload.get("schema") or payload.get("schema_data")
+
+        faq = faq_payload if faq_payload is not None else self._coerce_json(article.faq_json, default=[])
+        schema = (
+            schema_payload
+            if isinstance(schema_payload, (dict, list))
+            else self._coerce_json(article.schema_json, default={})
+        )
+
+        # Featured image (prefer override)
+        featured_image = payload.get("featured_image") or None
+        if featured_image is None:
+            image_urls = self._coerce_json(article.image_urls_json, default=[])
+            if image_urls:
+                featured_image = image_urls[0]
+
+        return {
+            "title": title,
+            "content": content,
+            "meta_title": meta_title,
+            "meta_description": meta_description,
+            "faq": faq,
+            "schema_data": schema,
+            "featured_image": featured_image,
+        }
 
     async def publish_article(self, site_id: int, job_id: int, article_data: dict, signature: str) -> PublishResponse:
         """Publish an article to WordPress."""
