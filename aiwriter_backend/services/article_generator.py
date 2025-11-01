@@ -323,6 +323,8 @@ class ArticleGenerator:
                 image_urls = await self.generate_images(job.topic, job.requested_images)
                 article.image_urls_json = image_urls
                 article.image_cost_cents = len(image_urls) * 4
+            if image_urls:
+                payload["featured_image"] = image_urls[0]
 
             article.status = ArticleStatus.READY
             article.updated_at = datetime.now(timezone.utc)
@@ -404,6 +406,8 @@ class ArticleGenerator:
             if url:
                 urls.append(url)
                 logger.info("Generated fallback image with OpenAI", extra={"topic": topic})
+            else:
+                logger.warning("OpenAI image generation returned no URL", extra={"topic": topic})
         except Exception as image_error:  # noqa: BLE001
             logger.warning(
                 "Image generation failed after Pexels fallback",
