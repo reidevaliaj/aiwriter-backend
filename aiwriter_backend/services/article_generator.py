@@ -318,11 +318,16 @@ class ArticleGenerator:
             article.schema_json = payload["schema"]
             article.outline_json = payload.get("outline")
 
+            image_urls: List[str] = []
             include_images = bool(job.requested_images and job.requested_images > 0)
             if include_images:
                 image_urls = await self.generate_images(job.topic, job.requested_images)
                 article.image_urls_json = image_urls
                 article.image_cost_cents = len(image_urls) * 4
+            else:
+                article.image_urls_json = []
+                article.image_cost_cents = 0
+
             if image_urls:
                 payload["featured_image"] = image_urls[0]
 
