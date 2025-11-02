@@ -27,8 +27,8 @@ class JobService:
         include_faq: bool = True,
         include_cta: bool = False,
         cta_url: str = None,
-        template: str = "classic",
-        style_preset: str = "default"
+        category: int = None,
+        tags: str = None
     ) -> JobResponse:
         """Create a new article generation job."""
         try:
@@ -97,6 +97,7 @@ class JobService:
                 requested_images = min(max(allowance, 0), 1)
             
             # Create job with Phase 3.5 fields
+            # Store category/tags in template/style_preset fields temporarily (repurposed)
             job = Job(
                 site_id=site_id,
                 topic=topic,
@@ -109,8 +110,8 @@ class JobService:
                 include_faq=include_faq,
                 include_cta=include_cta,
                 cta_url=cta_url,
-                template=template,
-                style_preset=style_preset,
+                template=str(category) if category else None,  # Store category ID as string
+                style_preset=tags if tags else None,  # Store tags
                 status="pending"
             )
             

@@ -27,7 +27,8 @@ async def create_job(
     print(f"[JOB_ROUTER] - User Images: {len(getattr(request, 'user_images', []) or [])} images")
     print(f"[JOB_ROUTER] - Include FAQ: {getattr(request, 'include_faq', True)}")
     print(f"[JOB_ROUTER] - Include CTA: {getattr(request, 'include_cta', False)}")
-    print(f"[JOB_ROUTER] - Template: {getattr(request, 'template', 'classic')}")
+    print(f"[JOB_ROUTER] - Category: {getattr(request, 'category', None) or 'None'}")
+    print(f"[JOB_ROUTER] - Tags: {getattr(request, 'tags', None) or 'None'}")
     print(f"[JOB_ROUTER] - Signature: {x_signature[:10]}...")
     
     service = JobService(db)
@@ -42,8 +43,8 @@ async def create_job(
         include_faq=getattr(request, 'include_faq', True),
         include_cta=getattr(request, 'include_cta', False),
         cta_url=getattr(request, 'cta_url', None),
-        template=getattr(request, 'template', 'classic'),
-        style_preset=getattr(request, 'style_preset', 'default')
+        category=getattr(request, 'category', None),
+        tags=getattr(request, 'tags', None)
     )
     
     print(f"[JOB_ROUTER] Job creation result: {result.success}, Message: {result.message}")

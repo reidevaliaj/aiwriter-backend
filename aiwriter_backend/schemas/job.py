@@ -16,8 +16,8 @@ class JobCreate(BaseModel):
     include_faq: bool = True  # Include FAQ section
     include_cta: bool = False  # Include call-to-action
     cta_url: Optional[str] = None  # CTA URL
-    template: str = "classic"  # Article template
-    style_preset: str = "default"  # Style preset
+    category: Optional[int] = None  # WordPress category ID
+    tags: Optional[str] = None  # WordPress tags (comma-separated)
 
 
 class JobResponse(BaseModel):

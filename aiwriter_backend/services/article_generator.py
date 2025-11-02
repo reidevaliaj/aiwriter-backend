@@ -335,9 +335,16 @@ class ArticleGenerator:
                 cta_html = f'<div class="aiwriter-cta" style="margin: 30px 0; padding: 20px; background: #f5f5f5; border-radius: 5px; text-align: center;"><a href="{job.cta_url}" class="button" style="display: inline-block; padding: 12px 24px; background: #0073aa; color: white; text-decoration: none; border-radius: 3px;">Jetzt kontaktieren</a></div>'
                 payload["article_html"] = payload["article_html"] + "\n\n" + cta_html
             
-            # Store template and style info (for WordPress to apply later)
-            payload["template"] = job.template
-            payload["style_preset"] = job.style_preset
+            # Store category and tags (passed from job)
+            if job.template:
+                try:
+                    payload["category"] = int(job.template)
+                except (ValueError, TypeError):
+                    payload["category"] = None
+            else:
+                payload["category"] = None
+            
+            payload["tags"] = job.style_preset if job.style_preset else None
 
             # Handle images: user-provided OR AI-generated
             image_urls: List[str] = []
