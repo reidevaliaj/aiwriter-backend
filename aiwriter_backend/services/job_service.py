@@ -15,7 +15,21 @@ class JobService:
     def __init__(self, db: Session):
         self.db = db
     
-    async def create_job(self, site_id: int, topic: str, length: str = "medium", include_images: bool = False, language: str = "de") -> JobResponse:
+    async def create_job(
+        self,
+        site_id: int,
+        topic: str,
+        length: str = "medium",
+        include_images: bool = False,
+        language: str = "de",
+        context: str = None,
+        user_images: list = None,
+        include_faq: bool = True,
+        include_cta: bool = False,
+        cta_url: str = None,
+        template: str = "classic",
+        style_preset: str = "default"
+    ) -> JobResponse:
         """Create a new article generation job."""
         try:
             print(f"[JOB_SERVICE] Creating job - Site ID: {site_id}, Topic: {topic}, Length: {length}, Include Images: {include_images}")
@@ -82,7 +96,7 @@ class JobService:
                     allowance = plan.max_images_per_article if plan.max_images_per_article is not None else 0
                 requested_images = min(max(allowance, 0), 1)
             
-            # Create job
+            # Create job with Phase 3.5 fields
             job = Job(
                 site_id=site_id,
                 topic=topic,
@@ -90,6 +104,13 @@ class JobService:
                 images=include_images,
                 requested_images=requested_images,
                 language=language,
+                context=context,
+                user_images=user_images if user_images else None,
+                include_faq=include_faq,
+                include_cta=include_cta,
+                cta_url=cta_url,
+                template=template,
+                style_preset=style_preset,
                 status="pending"
             )
             

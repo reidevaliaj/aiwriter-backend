@@ -68,6 +68,14 @@ class Job(Base):
     language = Column(String, default="de")  # article language
     status = Column(String, default="pending")  # pending, processing, completed, failed
     error = Column(Text, nullable=True)  # error message if failed
+    # Phase 3.5 fields
+    context = Column(Text, nullable=True)  # Additional context/keywords
+    user_images = Column(JSON, nullable=True)  # User-uploaded image URLs
+    include_faq = Column(Boolean, default=True)  # Include FAQ section
+    include_cta = Column(Boolean, default=False)  # Include call-to-action
+    cta_url = Column(String, nullable=True)  # CTA URL
+    template = Column(String, default="classic")  # Article template
+    style_preset = Column(String, default="default")  # Style preset
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
     

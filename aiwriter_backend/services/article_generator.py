@@ -140,7 +140,7 @@ def _normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) -
 
     faq = get_ci("faq", "faqs")
     if not isinstance(faq, list):
-        faq = []
+        faq = []  # Will be set to empty if include_faq=False
 
     schema = get_ci("schema", "jsonld")
     if not isinstance(schema, dict):
@@ -164,14 +164,22 @@ def _normalize_result(raw: Dict[str, Any], topic_fallback: str, language: str) -
     }
 
 
-def _build_messages(topic: str, language: str, length: str) -> List[Dict[str, str]]:
+def _build_messages(topic: str, language: str, length: str, context: str = None, include_faq: bool = True) -> List[Dict[str, str]]:
     guidance = _length_hint(length)
     published = datetime.now(timezone.utc).isoformat()
+    
+    context_section = ""
+    if context and context.strip():
+        context_section = f"\nZusätzlicher Kontext: {context.strip()}"
+
+    faq_section = ""
+    if include_faq:
+        faq_section = ',\n  "faq": [\n    {{"q": "string", "a": "string (80–100 Wörter)"}}\n  ]'
 
     user_prompt = f"""
 Sprache: {language}
 Thema: {topic}
-Länge: {guidance}
+Länge: {guidance}{context_section}
 
 Gib diese Struktur zurück:
 {{
@@ -180,10 +188,7 @@ Gib diese Struktur zurück:
   "meta": {{
     "title": "string (≤60 Zeichen)",
     "description": "string (≤155 Zeichen)"
-  }},
-  "faq": [
-    {{"q": "string", "a": "string (80–100 Wörter)"}}
-  ],
+  }}{faq_section},
   "schema": {{
     "@context": "https://schema.org",
     "@type": "Article",
@@ -194,7 +199,7 @@ Gib diese Struktur zurück:
 }}
 Regeln:
 - Meta-Title ≤ 60 Zeichen, Meta-Description ≤ 155 Zeichen.
-- 3–5 FAQ-Einträge.
+{"- FAQ-Einträge: 3–5 Einträge." if include_faq else "- Keine FAQ erforderlich."}
 - Kein Markdown, keine Codeblöcke, nur JSON-Inhalt.
 """
 
@@ -308,22 +313,47 @@ class ArticleGenerator:
                 topic=job.topic,
                 language=job.language or "de",
                 length=job.length or "medium",
+                context=job.context,
+                include_faq=job.include_faq,
             )
 
             article.topic = payload["title"]
             article.article_html = payload["article_html"]
             article.meta_title = payload["meta"]["title"]
             article.meta_description = payload["meta"]["description"]
-            article.faq_json = payload["faq"]
+            # Only include FAQ if requested
+            if job.include_faq:
+                article.faq_json = payload["faq"]
+            else:
+                article.faq_json = []
+            
             article.schema_json = payload["schema"]
             article.outline_json = payload.get("outline")
+            
+            # Add CTA to article HTML if requested
+            if job.include_cta and job.cta_url:
+                cta_html = f'<div class="aiwriter-cta" style="margin: 30px 0; padding: 20px; background: #f5f5f5; border-radius: 5px; text-align: center;"><a href="{job.cta_url}" class="button" style="display: inline-block; padding: 12px 24px; background: #0073aa; color: white; text-decoration: none; border-radius: 3px;">Jetzt kontaktieren</a></div>'
+                payload["article_html"] = payload["article_html"] + "\n\n" + cta_html
+            
+            # Store template and style info (for WordPress to apply later)
+            payload["template"] = job.template
+            payload["style_preset"] = job.style_preset
 
+            # Handle images: user-provided OR AI-generated
             image_urls: List[str] = []
-            include_images = bool(job.requested_images and job.requested_images > 0)
-            if include_images:
+            
+            # First, use user-provided images if available
+            if job.user_images and isinstance(job.user_images, list) and len(job.user_images) > 0:
+                image_urls = job.user_images
+                article.image_urls_json = image_urls
+                article.image_cost_cents = 0  # User images are free
+                logger.info(f"Using {len(image_urls)} user-provided images", extra={"job_id": job_id})
+            # Otherwise, generate AI images if requested
+            elif job.images and job.requested_images and job.requested_images > 0:
                 image_urls = await self.generate_images(job.topic, job.requested_images)
                 article.image_urls_json = image_urls
                 article.image_cost_cents = len(image_urls) * 4
+                logger.info(f"Generated {len(image_urls)} AI images", extra={"job_id": job_id})
             else:
                 article.image_urls_json = []
                 article.image_cost_cents = 0
@@ -367,8 +397,8 @@ class ArticleGenerator:
 
             return False
 
-    async def _generate_payload(self, *, topic: str, language: str, length: str) -> Dict[str, Any]:
-        messages = _build_messages(topic, language, length)
+    async def _generate_payload(self, *, topic: str, language: str, length: str, context: str = None, include_faq: bool = True) -> Dict[str, Any]:
+        messages = _build_messages(topic, language, length, context, include_faq)
         logger.info(
             "Calling OpenAI for article payload",
             extra={"model": settings.OPENAI_TEXT_MODEL, "topic": topic},

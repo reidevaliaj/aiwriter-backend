@@ -11,6 +11,13 @@ class JobCreate(BaseModel):
     topic: str
     length: str = "medium"  # short, medium, long
     include_images: bool = False
+    context: Optional[str] = None  # Additional context/keywords
+    user_images: Optional[list[str]] = None  # User-uploaded image URLs
+    include_faq: bool = True  # Include FAQ section
+    include_cta: bool = False  # Include call-to-action
+    cta_url: Optional[str] = None  # CTA URL
+    template: str = "classic"  # Article template
+    style_preset: str = "default"  # Style preset
 
 
 class JobResponse(BaseModel):
