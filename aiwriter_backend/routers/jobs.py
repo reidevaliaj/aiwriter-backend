@@ -74,10 +74,15 @@ async def get_job_status(
     if article and article.outline_json and isinstance(article.outline_json, dict):
         wordpress_post_id = article.outline_json.get("wordpress_post_id")
     
+    # Ensure status is a string (in case it's None or empty)
+    job_status = job.status or "pending"
+    
+    print(f"[JOB_STATUS] Job {job_id} status: {job_status}, post_id: {wordpress_post_id}")
+    
     # Return job status with post_id if available
     return JobStatus(
         job_id=job.id,
-        status=job.status,
+        status=job_status,
         topic=job.topic,
         created_at=job.created_at,
         finished_at=job.finished_at,
