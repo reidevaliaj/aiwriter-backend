@@ -161,6 +161,10 @@ class WebhookService:
         featured_image = payload.get("featured_image") or None
         content_image_urls = payload.get("image_urls") or []
         
+        # Ensure content_image_urls doesn't include the featured image
+        if featured_image and content_image_urls:
+            content_image_urls = [url for url in content_image_urls if url != featured_image]
+        
         if featured_image is None:
             image_urls = self._coerce_json(article.image_urls_json, default=[])
             if len(image_urls) == 1:
@@ -170,7 +174,7 @@ class WebhookService:
             elif len(image_urls) > 1:
                 # Multiple images: first featured, rest in content
                 featured_image = image_urls[0]
-                content_image_urls = image_urls[1:]
+                content_image_urls = [url for url in image_urls[1:] if url != featured_image]  # Explicitly exclude featured
 
         return {
             "title": title,

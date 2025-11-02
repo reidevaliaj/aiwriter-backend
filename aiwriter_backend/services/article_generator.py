@@ -365,13 +365,21 @@ class ArticleGenerator:
                 # Single image: featured only
                 payload["featured_image"] = image_urls[0]
                 payload["image_urls"] = []  # No images in content
+                logger.info(f"Single image: set as featured only", extra={"job_id": job_id, "featured": image_urls[0]})
             elif len(image_urls) > 1:
                 # Multiple images: first featured, rest in content
-                payload["featured_image"] = image_urls[0]
-                payload["image_urls"] = image_urls[1:]  # Remaining images for content
+                featured = image_urls[0]
+                content_images = image_urls[1:]  # Explicitly exclude first image
+                payload["featured_image"] = featured
+                payload["image_urls"] = content_images  # Only remaining images for content
+                logger.info(
+                    f"Multiple images: first as featured, {len(content_images)} in content",
+                    extra={"job_id": job_id, "featured": featured, "content_images": content_images}
+                )
             else:
                 payload["featured_image"] = None
                 payload["image_urls"] = []
+                logger.info(f"No images", extra={"job_id": job_id})
 
             article.status = ArticleStatus.READY
             article.updated_at = datetime.now(timezone.utc)
