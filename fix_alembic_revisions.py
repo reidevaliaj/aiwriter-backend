@@ -1,43 +1,62 @@
 #!/usr/bin/env python3
 """
-Fix Alembic revision chain by updating the alembic_version table.
-This script checks the current state and updates revision IDs to match the new naming.
+Fix Alembic revision chain by cleaning up duplicate entries in alembic_version table.
+This script checks what migrations have actually been applied and sets the correct version.
 """
 import sys
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from aiwriter_backend.core.config import settings
 
 def fix_alembic_revisions():
-    """Update alembic_version table to match new revision IDs."""
+    """Clean up alembic_version table and set correct version based on actual schema."""
     engine = create_engine(settings.DATABASE_URL)
     
     with engine.connect() as conn:
-        # Check current version
-        result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-        current_version = result.scalar()
+        # Check all current versions (might be duplicates)
+        result = conn.execute(text("SELECT version_num FROM alembic_version"))
+        all_versions = [row[0] for row in result]
         
-        print(f"Current Alembic version in database: {current_version}")
+        print(f"Current versions in alembic_version table: {all_versions}")
         
-        # Mapping of old IDs to new IDs
-        revision_map = {
-            '001': '001_initial_schema',
-            '002': '002_add_callback_url',
-            '003': '003_phase3_article_fields',  # In case it was created with just '003'
-        }
+        # Check what's actually in the database schema
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        has_articles = 'articles' in tables
+        has_jobs_context = False
         
-        # Update if needed
-        if current_version in revision_map:
-            new_version = revision_map[current_version]
-            print(f"Updating revision from '{current_version}' to '{new_version}'")
-            conn.execute(text("UPDATE alembic_version SET version_num = :new_version"), {"new_version": new_version})
-            conn.commit()
-            print(f"✅ Updated to: {new_version}")
-        elif current_version in revision_map.values():
-            print(f"✅ Version already correct: {current_version}")
+        if 'jobs' in tables:
+            columns = [col['name'] for col in inspector.get_columns('jobs')]
+            has_jobs_context = 'context' in columns
+        
+        # Determine correct version based on schema
+        if has_jobs_context:
+            correct_version = '004_phase35_job_fields'
+            print("✅ Database has Phase 3.5 fields (context, user_images, etc.)")
+        elif has_articles:
+            correct_version = '003_phase3_article_fields'
+            print("✅ Database has articles table (Phase 3)")
+        elif 'callback_url' in [col['name'] for col in inspector.get_columns('sites')]:
+            correct_version = '002_add_callback_url'
+            print("✅ Database has callback_url (Phase 2)")
         else:
-            print(f"⚠️  Unknown version '{current_version}'. Please check manually.")
-            print("Expected values: 001_initial_schema, 002_add_callback_url, 003_phase3_article_fields, 004_phase35_job_fields")
-            return False
+            correct_version = '001_initial_schema'
+            print("✅ Database has initial schema only")
+        
+        print(f"\n📌 Setting Alembic version to: {correct_version}")
+        
+        # Delete all existing entries
+        conn.execute(text("DELETE FROM alembic_version"))
+        
+        # Insert the correct version
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:version)"), {"version": correct_version})
+        conn.commit()
+        
+        print(f"✅ Fixed! Alembic version is now: {correct_version}")
+        
+        # Verify
+        result = conn.execute(text("SELECT version_num FROM alembic_version"))
+        final_version = result.scalar()
+        print(f"✅ Verified final version: {final_version}")
     
     return True
 
