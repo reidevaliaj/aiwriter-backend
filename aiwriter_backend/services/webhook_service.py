@@ -176,6 +176,10 @@ class WebhookService:
                 featured_image = image_urls[0]
                 content_image_urls = [url for url in image_urls[1:] if url != featured_image]  # Explicitly exclude featured
 
+        # Category and tags (from payload override)
+        category = payload.get("category")
+        tags = payload.get("tags")
+        
         return {
             "title": title,
             "content": content,
@@ -185,6 +189,8 @@ class WebhookService:
             "schema_data": schema,
             "featured_image": featured_image,
             "image_urls": content_image_urls,  # Images to include in content
+            "category": category,  # WordPress category ID
+            "tags": tags,  # WordPress tags (comma-separated)
         }
 
     async def publish_article(self, site_id: int, job_id: int, article_data: dict, signature: str) -> PublishResponse:
