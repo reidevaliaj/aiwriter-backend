@@ -4,7 +4,8 @@ Job management endpoints.
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from aiwriter_backend.db.session import get_db
-from aiwriter_backend.schemas.job import JobCreate, JobResponse
+from aiwriter_backend.db.base import Job, Article
+from aiwriter_backend.schemas.job import JobCreate, JobResponse, JobStatus
 from aiwriter_backend.services.job_service import JobService
 
 router = APIRouter()
@@ -59,9 +60,6 @@ async def get_job_status(
     db: Session = Depends(get_db)
 ):
     """Get job status."""
-    from aiwriter_backend.db.base import Job, Article
-    from aiwriter_backend.schemas.job import JobStatus
-    
     # Verify site exists
     service = JobService(db)
     # Basic validation - in production, verify signature
@@ -77,19 +75,12 @@ async def get_job_status(
         wordpress_post_id = article.outline_json.get("wordpress_post_id")
     
     # Return job status with post_id if available
-    status_response = JobStatus(
+    return JobStatus(
         job_id=job.id,
         status=job.status,
         topic=job.topic,
         created_at=job.created_at,
         finished_at=job.finished_at,
-        error=job.error
+        error=job.error,
+        wordpress_post_id=wordpress_post_id
     )
-    
-    # Add post_id to response (we'll need to extend JobStatus schema or use a dict)
-    # For now, return as dict to include post_id
-    from fastapi.responses import JSONResponse
-    response_dict = status_response.dict()
-    if wordpress_post_id:
-        response_dict["wordpress_post_id"] = wordpress_post_id
-    return response_dict

@@ -35,6 +35,7 @@ class JobStatus(BaseModel):
     created_at: datetime
     finished_at: Optional[datetime] = None
     error: Optional[str] = None
+    wordpress_post_id: Optional[int] = None  # WordPress post ID if article is published
 
 
 class ArticleData(BaseModel):
