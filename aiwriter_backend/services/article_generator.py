@@ -398,13 +398,33 @@ class ArticleGenerator:
             job.finished_at = datetime.now(timezone.utc)
 
             self.db.commit()
-
+            
+            # Refresh to ensure status is saved
+            self.db.refresh(job)
+            
             logger.info(
-                "[ARTICLE_GENERATOR] Article generated successfully",
-                extra={"job_id": job_id, "article_id": article.id},
+                "[ARTICLE_GENERATOR] Article generated successfully - Job status set to completed",
+                extra={"job_id": job_id, "article_id": article.id, "job_status": job.status},
             )
 
-            await self.webhook_service.send_article_to_wordpress(article.id, payload_override=payload)
+            # Send webhook (don't let webhook failure affect job status)
+            try:
+                webhook_result = await self.webhook_service.send_article_to_wordpress(article.id, payload_override=payload)
+                if webhook_result:
+                    logger.info(
+                        "[ARTICLE_GENERATOR] Article sent to WordPress successfully",
+                        extra={"job_id": job_id, "article_id": article.id},
+                    )
+                else:
+                    logger.warning(
+                        "[ARTICLE_GENERATOR] Article sent to WordPress but webhook returned False",
+                        extra={"job_id": job_id, "article_id": article.id},
+                    )
+            except Exception as webhook_error:
+                logger.error(
+                    "[ARTICLE_GENERATOR] Error sending to WordPress (job still marked as completed)",
+                    extra={"job_id": job_id, "article_id": article.id, "error": str(webhook_error)},
+                )
 
             return True
 
