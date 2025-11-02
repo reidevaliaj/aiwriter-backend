@@ -399,12 +399,9 @@ class ArticleGenerator:
 
             self.db.commit()
             
-            # Refresh to ensure status is saved
-            self.db.refresh(job)
-            
             logger.info(
                 "[ARTICLE_GENERATOR] Article generated successfully - Job status set to completed",
-                extra={"job_id": job_id, "article_id": article.id, "job_status": job.status},
+                extra={"job_id": job_id, "article_id": article.id, "job_status": "completed"},
             )
 
             # Send webhook (don't let webhook failure affect job status)
