@@ -17,13 +17,20 @@ depends_on = None
 
 def upgrade() -> None:
     # Add Phase 3.5 fields to jobs table
+    # Use nullable columns with application-level defaults to avoid table rewrite
     op.add_column('jobs', sa.Column('context', sa.Text(), nullable=True))
     op.add_column('jobs', sa.Column('user_images', postgresql.JSON(astext_type=sa.Text()), nullable=True))
-    op.add_column('jobs', sa.Column('include_faq', sa.Boolean(), server_default=sa.text('true'), nullable=False))
-    op.add_column('jobs', sa.Column('include_cta', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+    op.add_column('jobs', sa.Column('include_faq', sa.Boolean(), nullable=True, server_default=sa.text('true')))
+    op.add_column('jobs', sa.Column('include_cta', sa.Boolean(), nullable=True, server_default=sa.text('false')))
     op.add_column('jobs', sa.Column('cta_url', sa.String(), nullable=True))
-    op.add_column('jobs', sa.Column('template', sa.String(), server_default='classic', nullable=False))
-    op.add_column('jobs', sa.Column('style_preset', sa.String(), server_default='default', nullable=False))
+    op.add_column('jobs', sa.Column('template', sa.String(), nullable=True, server_default='classic'))
+    op.add_column('jobs', sa.Column('style_preset', sa.String(), nullable=True, server_default='default'))
+    
+    # Update existing NULL rows (if any) with defaults
+    op.execute("UPDATE jobs SET include_faq = COALESCE(include_faq, true) WHERE include_faq IS NULL")
+    op.execute("UPDATE jobs SET include_cta = COALESCE(include_cta, false) WHERE include_cta IS NULL")
+    op.execute("UPDATE jobs SET template = COALESCE(template, 'classic') WHERE template IS NULL")
+    op.execute("UPDATE jobs SET style_preset = COALESCE(style_preset, 'default') WHERE style_preset IS NULL")
 
 
 def downgrade() -> None:
