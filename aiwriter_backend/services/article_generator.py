@@ -345,6 +345,9 @@ class ArticleGenerator:
                 payload["category"] = None
             
             payload["tags"] = job.style_preset if job.style_preset else None
+            
+            # Include FAQ flag so WordPress knows whether to render FAQ
+            payload["include_faq"] = job.include_faq
 
             # Handle images: user-provided OR AI-generated
             image_urls: List[str] = []

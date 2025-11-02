@@ -79,7 +79,15 @@ class WebhookService:
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"Article {article_id} sent to WordPress successfully")
+                post_id = result.get("post_id")
+                logger.info(f"Article {article_id} sent to WordPress successfully, post_id: {post_id}")
+                
+                # Store WordPress post ID in article's outline_json
+                if post_id:
+                    if article.outline_json and isinstance(article.outline_json, dict):
+                        article.outline_json["wordpress_post_id"] = post_id
+                    else:
+                        article.outline_json = {"wordpress_post_id": post_id}
                 
                 # Update article status
                 article.status = ArticleStatus.READY
@@ -180,6 +188,9 @@ class WebhookService:
         category = payload.get("category")
         tags = payload.get("tags")
         
+        # Include FAQ flag
+        include_faq = payload.get("include_faq", True)  # Default to True for backwards compatibility
+        
         return {
             "title": title,
             "content": content,
@@ -191,6 +202,7 @@ class WebhookService:
             "image_urls": content_image_urls,  # Images to include in content
             "category": category,  # WordPress category ID
             "tags": tags,  # WordPress tags (comma-separated)
+            "include_faq": include_faq,  # Whether FAQ was requested
         }
 
     async def publish_article(self, site_id: int, job_id: int, article_data: dict, signature: str) -> PublishResponse:
@@ -247,6 +259,19 @@ class WebhookService:
             
             if response.status_code == 200:
                 result = response.json()
+                post_id = result.get("post_id")
+                
+                # Store WordPress post ID in article
+                article = self.db.query(Article).filter(Article.job_id == job_id).first()
+                if article and post_id:
+                    # Store as JSON in a metadata field (or add column later)
+                    # For now, we'll add it to article metadata or store in job
+                    # Since we don't have wordpress_post_id column, store in article's outline_json temporarily
+                    if article.outline_json and isinstance(article.outline_json, dict):
+                        article.outline_json["wordpress_post_id"] = post_id
+                    else:
+                        article.outline_json = {"wordpress_post_id": post_id}
+                    self.db.commit()
                 
                 # Update job status
                 job.status = "completed"
@@ -255,7 +280,7 @@ class WebhookService:
                 
                 return PublishResponse(
                     success=True,
-                    post_id=result.get("post_id"),
+                    post_id=post_id,
                     message="Article published successfully"
                 )
             else:

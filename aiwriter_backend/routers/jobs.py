@@ -49,3 +49,47 @@ async def create_job(
     
     print(f"[JOB_ROUTER] Job creation result: {result.success}, Message: {result.message}")
     return result
+
+
+@router.get("/{job_id}/status", response_model=JobStatus)
+async def get_job_status(
+    job_id: int,
+    x_site_id: int = Header(..., alias="X-Site-ID"),
+    x_signature: str = Header(..., alias="X-Signature"),
+    db: Session = Depends(get_db)
+):
+    """Get job status."""
+    from aiwriter_backend.db.base import Job, Article
+    from aiwriter_backend.schemas.job import JobStatus
+    
+    # Verify site exists
+    service = JobService(db)
+    # Basic validation - in production, verify signature
+    
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Get article if exists to retrieve WordPress post ID
+    article = db.query(Article).filter(Article.job_id == job_id).first()
+    wordpress_post_id = None
+    if article and article.outline_json and isinstance(article.outline_json, dict):
+        wordpress_post_id = article.outline_json.get("wordpress_post_id")
+    
+    # Return job status with post_id if available
+    status_response = JobStatus(
+        job_id=job.id,
+        status=job.status,
+        topic=job.topic,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+        error=job.error
+    )
+    
+    # Add post_id to response (we'll need to extend JobStatus schema or use a dict)
+    # For now, return as dict to include post_id
+    from fastapi.responses import JSONResponse
+    response_dict = status_response.dict()
+    if wordpress_post_id:
+        response_dict["wordpress_post_id"] = wordpress_post_id
+    return response_dict
