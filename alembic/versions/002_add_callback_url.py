@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '002'
-down_revision = '001'
+revision = '002_add_callback_url'
+down_revision = '001_initial_schema'
 branch_labels = None
 depends_on = None
 
