@@ -55,10 +55,7 @@ class WebhookService:
             # Prepare article data, preferring freshly generated payload if provided
             article_data = self._build_article_payload(article, payload_override)
             
-            # Add featured image if available
-            image_urls = self._coerce_json(article.image_urls_json, default=[])
-            if image_urls:
-                article_data["featured_image"] = image_urls[0]
+            # Image URLs are already handled in _build_article_payload
             
             # Create HMAC signature
             payload_str = json.dumps(article_data, sort_keys=True)
@@ -160,12 +157,20 @@ class WebhookService:
             else self._coerce_json(article.schema_json, default={})
         )
 
-        # Featured image (prefer override)
+        # Featured image and content images (prefer override)
         featured_image = payload.get("featured_image") or None
+        content_image_urls = payload.get("image_urls") or []
+        
         if featured_image is None:
             image_urls = self._coerce_json(article.image_urls_json, default=[])
-            if image_urls:
+            if len(image_urls) == 1:
+                # Single image: featured only
                 featured_image = image_urls[0]
+                content_image_urls = []
+            elif len(image_urls) > 1:
+                # Multiple images: first featured, rest in content
+                featured_image = image_urls[0]
+                content_image_urls = image_urls[1:]
 
         return {
             "title": title,
@@ -175,6 +180,7 @@ class WebhookService:
             "faq": faq,
             "schema_data": schema,
             "featured_image": featured_image,
+            "image_urls": content_image_urls,  # Images to include in content
         }
 
     async def publish_article(self, site_id: int, job_id: int, article_data: dict, signature: str) -> PublishResponse:

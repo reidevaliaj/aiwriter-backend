@@ -358,8 +358,20 @@ class ArticleGenerator:
                 article.image_urls_json = []
                 article.image_cost_cents = 0
 
-            if image_urls:
+            # Image handling logic:
+            # - If 1 image: Set as featured only (not in content)
+            # - If 2+ images: First as featured, remaining in content
+            if len(image_urls) == 1:
+                # Single image: featured only
                 payload["featured_image"] = image_urls[0]
+                payload["image_urls"] = []  # No images in content
+            elif len(image_urls) > 1:
+                # Multiple images: first featured, rest in content
+                payload["featured_image"] = image_urls[0]
+                payload["image_urls"] = image_urls[1:]  # Remaining images for content
+            else:
+                payload["featured_image"] = None
+                payload["image_urls"] = []
 
             article.status = ArticleStatus.READY
             article.updated_at = datetime.now(timezone.utc)
