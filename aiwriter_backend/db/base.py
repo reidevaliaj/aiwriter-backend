@@ -53,6 +53,7 @@ class Site(Base):
     license = relationship("License", back_populates="sites")
     jobs = relationship("Job", back_populates="site")
     usage = relationship("Usage", back_populates="site")
+    scheduled_jobs = relationship("ScheduledJob", back_populates="site")
 
 
 class Job(Base):
@@ -130,3 +131,32 @@ class Usage(Base):
     
     # Relationships
     site = relationship("Site", back_populates="usage")
+
+
+class ScheduledJob(Base):
+    """Scheduled article job model for Option 2 - AutoPilot Scheduler."""
+    __tablename__ = "scheduled_jobs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False)
+    license_id = Column(Integer, ForeignKey("licenses.id"), nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)  # Short description
+    context = Column(Text, nullable=True)  # Website context for AI generation
+    goal = Column(String, nullable=True)  # Goal: contact page, newsletter, shop, etc.
+    publish_date = Column(DateTime(timezone=True), nullable=False)  # When to publish
+    user_images = Column(JSON, nullable=True)  # Optional per-article images
+    generate_images = Column(Boolean, default=False)  # Whether to generate AI images
+    status = Column(String, default="pending")  # pending, processing, completed, failed
+    error = Column(Text, nullable=True)  # Error message if failed
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True)  # Link to generated job
+    article_id = Column(Integer, ForeignKey("articles.id"), nullable=True)  # Link to generated article
+    wordpress_post_id = Column(Integer, nullable=True)  # WordPress post ID after publishing
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    site = relationship("Site", back_populates="scheduled_jobs")
+    license = relationship("License")
+    job = relationship("Job")
+    article = relationship("Article")
