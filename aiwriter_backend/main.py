@@ -16,8 +16,8 @@ from aiwriter_backend.services.scheduler_service import SchedulerService
 
 logger = logging.getLogger(__name__)
 
-# Initialize APScheduler
-scheduler = AsyncIOScheduler()
+# Initialize APScheduler (renamed to avoid conflict with scheduler router module)
+job_scheduler = AsyncIOScheduler()
 
 app = FastAPI(
     title="AIWriter Backend API",
@@ -62,7 +62,7 @@ async def startup_event():
     init_db()
     
     # Schedule daily job processing at 2 AM UTC
-    scheduler.add_job(
+    job_scheduler.add_job(
         process_due_scheduled_jobs,
         trigger=CronTrigger(hour=2, minute=0),  # Run daily at 2 AM UTC
         id="process_scheduled_jobs",
@@ -70,14 +70,14 @@ async def startup_event():
         replace_existing=True
     )
     
-    scheduler.start()
+    job_scheduler.start()
     logger.info("APScheduler started - scheduled jobs will be processed daily at 2 AM UTC")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Shutdown scheduler on application shutdown."""
-    scheduler.shutdown(wait=False)
+    job_scheduler.shutdown(wait=False)
     logger.info("APScheduler stopped")
 
 @app.get("/")
