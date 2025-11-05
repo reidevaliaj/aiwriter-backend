@@ -344,7 +344,11 @@ class ArticleGenerator:
             else:
                 payload["category"] = None
             
-            payload["tags"] = job.style_preset if job.style_preset else None
+            # Only include tags if they exist and are not "default"
+            if job.style_preset and job.style_preset.strip() and job.style_preset.lower() != 'default':
+                payload["tags"] = job.style_preset
+            else:
+                payload["tags"] = None
             
             # Include FAQ flag so WordPress knows whether to render FAQ
             payload["include_faq"] = job.include_faq

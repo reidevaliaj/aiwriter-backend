@@ -1,10 +1,11 @@
 """
 Job management endpoints.
 """
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from aiwriter_backend.db.session import get_db
-from aiwriter_backend.db.base import Job, Article
+from aiwriter_backend.db.base import Job, Article, ArticleStatus
 from aiwriter_backend.schemas.job import JobCreate, JobResponse, JobStatus
 from aiwriter_backend.services.job_service import JobService
 
@@ -77,7 +78,19 @@ async def get_job_status(
     # Ensure status is a string (in case it's None or empty)
     job_status = job.status or "pending"
     
-    print(f"[JOB_STATUS] Job {job_id} status: {job_status}, post_id: {wordpress_post_id}")
+    # If article exists and is ready, but job status is still processing, mark as completed
+    # This handles cases where the job status update didn't persist correctly
+    if article and article.status == ArticleStatus.READY and job_status in ["pending", "processing"]:
+        old_status = job_status
+        job_status = "completed"
+        # Update job status in database
+        job.status = "completed"
+        if not job.finished_at:
+            job.finished_at = article.updated_at or datetime.now(timezone.utc)
+        db.commit()
+        print(f"[JOB_STATUS] Job {job_id} status corrected from {old_status} to completed (article exists and is ready)")
+    
+    print(f"[JOB_STATUS] Job {job_id} status: {job_status}, post_id: {wordpress_post_id}, article_exists: {article is not None}")
     
     # Return job status with post_id if available
     return JobStatus(
